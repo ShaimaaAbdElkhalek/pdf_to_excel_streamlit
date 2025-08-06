@@ -4,3 +4,4 @@ tabula-py
 PyMuPDF
 openpyxl
 pdfplumber
+camelot
