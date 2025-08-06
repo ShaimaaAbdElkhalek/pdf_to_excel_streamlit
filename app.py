@@ -1,83 +1,137 @@
 import streamlit as st
+import os
+import tabula
 import fitz  # PyMuPDF
-import pdfplumber
 import pandas as pd
-import re
-import tempfile
 from pathlib import Path
-import zipfile
+import re
+from io import BytesIO
 
 # =========================
 # Helper Functions
 # =========================
-
 def is_data_row(row):
+    """Check if a row contains numeric values."""
     return any(str(cell).replace(",", "").replace("٫", ".").replace("٬", ".").replace(" ", "").isdigit() for cell in row)
 
 def find_field(text, keyword):
+    """Extracts value following a given keyword from the text."""
     pattern = rf"{keyword}[:\s]*([^\n]*)"
     match = re.search(pattern, text)
-    return match.group(1).strip() if match else ""
+    if match:
+        return match.group(1).strip()
+    return ""
 
-def process_pdf(pdf_path):
+def process_pdfs(uploaded_files):
     all_rows = []
-    try:
-        with fitz.open(pdf_path) as doc:
-            full_text = "\n".join([page.get_text() for page in doc])
 
-        invoice_number = find_field(full_text, "رقم الفاتورة")
-        invoice_date = find_field(full_text, "تاريخ الفاتورة")
-        customer_name = find_field(full_text, "فاتورة ضريبية")
-        address_part2 = find_field(full_text, "العنوان")
-        address_part1 = find_field(full_text, "رقم السجل")
-        address = f"{address_part1} {address_part2}" if address_part1 or address_part2 else ""
-        paid_value = find_field(full_text, "مدفوع")
-        balance_value = find_field(full_text, "الرصيد المستحق")
+    for uploaded_file in uploaded_files:
+        try:
+            st.write(f"📄 Processing: {uploaded_file.name}")
 
-        with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages:
-                table = page.extract_table()
-                if table:
-                    df = pd.DataFrame(table[1:], columns=table[0])
-                    df = df.dropna(how="all")
-                    df["Invoice Number"] = invoice_number
-                    df["Invoice Date"] = invoice_date
-                    df["Customer Name"] = customer_name
-                    df["Address"] = address
-                    df["Paid"] = paid_value
-                    df["Balance"] = balance_value
-                    df["Source File"] = pdf_path.name
-                    all_rows.append(df)
+            # Save uploaded file temporarily
+            temp_pdf_path = f"temp_{uploaded_file.name}"
+            with open(temp_pdf_path, "wb") as f:
+                f.write(uploaded_file.read())
 
-        if all_rows:
-            return pd.concat(all_rows, ignore_index=True)
+            # Extract full text
+            with fitz.open(temp_pdf_path) as doc:
+                full_text = "\n".join([page.get_text() for page in doc])
 
-    except Exception as e:
-        st.warning(f"❌ Failed to process {pdf_path.name}: {e}")
+            # Extract non-table fields
+            invoice_number = find_field(full_text, "رقم الفاتورة")
+            invoice_date = find_field(full_text, "تاريخ الفاتورة")
+            customer_name = find_field(full_text, "فاتورة ضريبية")
+            address_part2 = find_field(full_text, "العنوان")
+            address_part1 = find_field(full_text, "رقم السجل")
+            address = f"{address_part1} {address_part2}" if address_part1 or address_part2 else ""
+            paid_value = find_field(full_text, "مدفوع")
+            balance_value = find_field(full_text, "الرصيد المستحق")
 
-    return pd.DataFrame()
+            # Extract tables
+            tables = tabula.read_pdf(temp_pdf_path, pages='all', multiple_tables=True, stream=True)
 
-def clean_df(df):
-    df["Customer Name"] = df["Customer Name"].astype(str).str.replace(
-        r"^\s*اسم العميل\s*[:：﹕٭‪]?\s*", "", regex=True).str.strip(" :：﹕")
+            for table in tables:
+                if not table.empty:
+                    merged_rows = []
+                    temp_row = []
 
-    df["Address"] = df["Address"].astype(str).str.replace(
-        r"^\s*العنوان\s*[:：﹕٭‪]?\s*", "", regex=True).str.replace(
-        r"رقم الجوال.*", "", regex=True).str.strip(" :：﹕")
+                    for _, row in table.iterrows():
+                        row_values = row.fillna("").astype(str).tolist()
 
+                        if is_data_row(row_values):
+                            if temp_row:
+                                combined = [temp_row[0] + " " + row_values[0]] + row_values[1:]
+                                merged_rows.append(combined)
+                                temp_row = []
+                            else:
+                                merged_rows.append(row_values)
+                        else:
+                            temp_row = row_values
+
+                    if merged_rows:
+                        column_headers = ["المجموع", "الكمية", "سعر الوحدة", "العدد", "الوصف", "البند"]
+                        df_merged = pd.DataFrame(merged_rows, columns=column_headers[:len(merged_rows[0])])
+
+                        # Add extracted fields
+                        df_merged["Invoice Number"] = invoice_number
+                        df_merged["Invoice Date"] = invoice_date
+                        df_merged["Customer Name"] = customer_name
+                        df_merged["Address"] = address
+                        df_merged["Paid"] = paid_value
+                        df_merged["Balance"] = balance_value
+                        df_merged["Source File"] = uploaded_file.name
+
+                        all_rows.append(df_merged)
+
+            os.remove(temp_pdf_path)
+
+        except Exception as e:
+            st.error(f"❌ Error in {uploaded_file.name}: {e}")
+
+    if not all_rows:
+        return pd.DataFrame()
+
+    # Combine data
+    final_df = pd.concat(all_rows, ignore_index=True)
+
+    # Clean Customer Name
+    final_df["Customer Name"] = (
+        final_df["Customer Name"].astype(str)
+        .str.replace(r"اسم العميل\s*[:：]?\s*", "", regex=True)
+        .str.strip(" :：﹕")
+    )
+
+    # Clean Address
+    final_df["Address"] = (
+        final_df["Address"].astype(str)
+        .str.replace(r"العنوان\s*[:：]?\s*", "", regex=True)
+        .str.strip(" :：﹕")
+    )
+
+    # Clean Paid and Balance
     for col in ["Paid", "Balance"]:
-        df[col] = df[col].astype(str).str.replace(
-            r"[^\d.,]", "", regex=True).str.replace(",", "").astype(float)
+        final_df[col] = (
+            final_df[col].astype(str)
+            .str.replace(r"[^\d.,]", "", regex=True)
+            .str.replace(",", "", regex=False)
+            .astype(float)
+        )
 
-    if "العدد" in df.columns:
-        df["العدد"] = pd.to_numeric(df["العدد"], errors="coerce")
+    # Ensure numeric
+    final_df["العدد"] = pd.to_numeric(final_df["العدد"], errors="coerce")
+    final_df["المجموع"] = (
+        final_df["المجموع"].astype(str)
+        .str.replace(r"[^\d.,]", "", regex=True)
+        .str.replace(",", "", regex=False)
+        .astype(float)
+    )
 
-    if "المجموع" in df.columns:
-        df["المجموع"] = df["المجموع"].astype(str).str.replace(
-            r"[^\d.,]", "", regex=True).str.replace(",", "").astype(float)
-        df["VAT 15% Calc"] = (df["المجموع"] * 0.15).round(2)
+    # VAT
+    final_df["VAT 15% Calc"] = (final_df["المجموع"] * 0.15).round(2)
 
-    df = df.rename(columns={
+    # Rename columns
+    final_df = final_df.rename(columns={
         "المجموع": "Total before tax",
         "سعر الوحدة": "Unit price",
         "العدد": "Quantity",
@@ -85,62 +139,49 @@ def clean_df(df):
         "البند": "SKU"
     })
 
-    if "Total before tax" in df.columns:
-        df["VAT 15% Calc"] = (df["Total before tax"] * 0.15).round(2)
-        df["Total after tax"] = (df["Total before tax"] + df["VAT 15% Calc"]).round(2)
+    # Calculate totals
+    final_df["VAT 15% Calc"] = (final_df["Total before tax"] * 0.15).round(2)
+    final_df["Total after tax"] = (final_df["Total before tax"] + final_df["VAT 15% Calc"]).round(2)
 
-    expected_columns = [
-        "Invoice Number", "Invoice Date", "Customer Name", "Address", "Paid", "Balance",
-        "Total before tax", "VAT 15% Calc", "Total after tax",
-        "Unit price", "Quantity", "Description", "SKU", "Source File"
+    # Reorder
+    final_df = final_df[
+        [
+            "Invoice Number", "Invoice Date", "Customer Name", "Address", "Paid", "Balance",
+            "Total before tax", "VAT 15% Calc", "Total after tax",
+            "Unit price", "Quantity", "Description", "SKU",
+            "Source File"
+        ]
     ]
 
-    for col in expected_columns:
-        if col not in df.columns:
-            df[col] = ""
+    return final_df
 
-    return df[expected_columns]
 
 # =========================
-# Streamlit UI
+# Streamlit App
 # =========================
+st.title("📄 PDF Invoice Extractor & Cleaner")
 
-st.title("📄 Arabic Invoice PDF to Excel Converter")
-st.markdown("Upload one or more PDF invoices (or a ZIP folder of PDFs), and get a cleaned Excel sheet with extracted data.")
+uploaded_files = st.file_uploader(
+    "Upload one or more PDF invoices",
+    type=["pdf"],
+    accept_multiple_files=True
+)
 
-uploaded_file = st.file_uploader("Upload PDF files or ZIP folder", type=["pdf", "zip"], accept_multiple_files=True)
+if uploaded_files:
+    df = process_pdfs(uploaded_files)
 
-if uploaded_file:
-    with st.spinner("Processing files..."):
-        temp_dir = tempfile.TemporaryDirectory()
-        pdf_paths = []
+    if not df.empty:
+        st.success("✅ Data extracted successfully!")
+        st.dataframe(df)
 
-        for file in uploaded_file:
-            suffix = Path(file.name).suffix.lower()
-            if suffix == ".pdf":
-                file_path = Path(temp_dir.name) / file.name
-                with open(file_path, "wb") as f:
-                    f.write(file.read())
-                pdf_paths.append(file_path)
-            elif suffix == ".zip":
-                zip_path = Path(temp_dir.name) / file.name
-                with open(zip_path, "wb") as f:
-                    f.write(file.read())
-                with zipfile.ZipFile(zip_path, "r") as zip_ref:
-                    zip_ref.extractall(temp_dir.name)
-                    pdf_paths += list(Path(temp_dir.name).rglob("*.pdf"))
-
-        all_dataframes = [process_pdf(pdf) for pdf in pdf_paths]
-        all_dataframes = [df for df in all_dataframes if not df.empty]
-
-        if all_dataframes:
-            final_df = pd.concat(all_dataframes, ignore_index=True)
-            cleaned_df = clean_df(final_df)
-            excel_path = Path(temp_dir.name) / "Cleaned_Invoices.xlsx"
-            cleaned_df.to_excel(excel_path, index=False)
-
-            st.success("✅ Done! Download the Excel file below.")
-            with open(excel_path, "rb") as f:
-                st.download_button("⬇️ Download Excel File", f, file_name="Invoices_Cleaned.xlsx")
-        else:
-            st.warning("⚠️ No valid data found in uploaded PDFs.")
+        # Download Excel
+        output = BytesIO()
+        df.to_excel(output, index=False)
+        st.download_button(
+            label="📥 Download Excel",
+            data=output.getvalue(),
+            file_name="Cleaned_Combined_Tables.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.warning("⚠️ No valid tables found.")
