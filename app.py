@@ -6,6 +6,7 @@ import pandas as pd
 from pathlib import Path
 import re
 from io import BytesIO
+import camelot
 
 # =========================
 # Helper Functions
@@ -49,7 +50,7 @@ def process_pdfs(uploaded_files):
             balance_value = find_field(full_text, "الرصيد المستحق")
 
             # Extract tables
-            tables = tabula.read_pdf(temp_pdf_path, pages='all', multiple_tables=True, stream=True)
+            tables = camelot.read_pdf(temp_pdf_path, pages='all', flavor='stream')
 
             for table in tables:
                 if not table.empty:
