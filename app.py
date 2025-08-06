@@ -41,7 +41,7 @@ def process_pdf(pdf_path):
         balance_value = find_field(full_text, "الرصيد المستحق")
 
         # Extract tables using tabula
-        tables = tabula.read_pdf(str(pdf_path), pages='all', multiple_tables=True, stream=True)
+        tables = tabula.read_pdf(str(pdf_path), pages='all', multiple_tables=True, stream=False)
 
         for table in tables:
             if not table.empty:
