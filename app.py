@@ -1,6 +1,5 @@
 import streamlit as st
 import fitz  # PyMuPDF
-import tabula
 import pandas as pd
 import re
 import tempfile
@@ -35,7 +34,7 @@ def process_pdf(pdf_path):
         paid_value = find_field(full_text, "مدفوع")
         balance_value = find_field(full_text, "الرصيد المستحق")
 
-        tables = tabula.read_pdf(str(pdf_path), pages='all', multiple_tables=True, stream=True)
+        tables = pdfplumber.read_pdf(str(pdf_path), pages='all', multiple_tables=True, stream=True)
 
         for table in tables:
             if not table.empty:
