@@ -18,6 +18,8 @@ def find_field(text, keyword):
     match = re.search(pattern, text)
     return match.group(1).strip() if match else ""
 
+import tabula
+
 def process_pdf(pdf_path):
     all_rows = []
     try:
@@ -33,20 +35,37 @@ def process_pdf(pdf_path):
         paid_value = find_field(full_text, "مدفوع")
         balance_value = find_field(full_text, "الرصيد المستحق")
 
-        with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages:
-                table = page.extract_table()
-                if table:
-                    df = pd.DataFrame(table[1:], columns=table[0])
-                    df = df.dropna(how="all")  # Drop empty rows
-                    df["Invoice Number"] = invoice_number
-                    df["Invoice Date"] = invoice_date
-                    df["Customer Name"] = customer_name
-                    df["Address"] = address
-                    df["Paid"] = paid_value
-                    df["Balance"] = balance_value
-                    df["Source File"] = pdf_path.name
-                    all_rows.append(df)
+        tables = tabula.read_pdf(str(pdf_path), pages='all', multiple_tables=True, stream=True)
+
+        for table in tables:
+            if not table.empty:
+                merged_rows = []
+                temp_row = []
+
+                for _, row in table.iterrows():
+                    row_values = row.fillna("").astype(str).tolist()
+
+                    if is_data_row(row_values):
+                        if temp_row:
+                            combined = [temp_row[0] + " " + row_values[0]] + row_values[1:]
+                            merged_rows.append(combined)
+                            temp_row = []
+                        else:
+                            merged_rows.append(row_values)
+                    else:
+                        temp_row = row_values
+
+                if merged_rows:
+                    column_headers = ["المجموع", "الكمية", "سعر الوحدة", "العدد", "الوصف", "البند"]
+                    df_merged = pd.DataFrame(merged_rows, columns=column_headers[:len(merged_rows[0])])
+                    df_merged["Invoice Number"] = invoice_number
+                    df_merged["Invoice Date"] = invoice_date
+                    df_merged["Customer Name"] = customer_name
+                    df_merged["Address"] = address
+                    df_merged["Paid"] = paid_value
+                    df_merged["Balance"] = balance_value
+                    df_merged["Source File"] = pdf_path.name
+                    all_rows.append(df_merged)
 
         if all_rows:
             return pd.concat(all_rows, ignore_index=True)
@@ -55,6 +74,7 @@ def process_pdf(pdf_path):
         st.warning(f"❌ Failed to process {pdf_path.name}: {e}")
 
     return pd.DataFrame()
+
 
 def clean_df(df):
     df["Customer Name"] = df["Customer Name"].astype(str).str.replace(r"^\s*اسم العميل\s*[:：﹕٭‪]?\s*", "", regex=True).str.strip(" :：﹕")
