@@ -1,15 +1,13 @@
-# streamlit_app.py
-
 import streamlit as st
 import os
 import shutil
-import tabula
 import fitz  # PyMuPDF
 import pandas as pd
 import re
 import tempfile
 import zipfile
 from pathlib import Path
+import pdfplumber
 
 # =========================
 # Helper Functions
@@ -45,7 +43,6 @@ def process_pdf(pdf_path, safe_folder):
         shutil.copy(pdf_path, safe_pdf_path)
 
         # Extract tables using pdfplumber
-        import pdfplumber
         with pdfplumber.open(safe_pdf_path) as pdf:
             all_tables = []
             for page in pdf.pages:
@@ -58,7 +55,12 @@ def process_pdf(pdf_path, safe_folder):
 
         if all_tables:
             combined_df = pd.concat(all_tables, ignore_index=True)
-            combined_df.columns = [f"col_{i}" for i in range(len(combined_df.columns))]
+
+            # Try assigning column names
+            if len(combined_df.columns) == 6:
+                combined_df.columns = ["المجموع", "الكمية", "سعر الوحدة", "العدد", "الوصف", "البند"]
+            else:
+                combined_df.columns = [f"col_{i}" for i in range(len(combined_df.columns))]
 
             # Add metadata columns
             combined_df["Invoice Number"] = invoice_number
@@ -98,8 +100,7 @@ if uploaded_files:
             if uploaded_file.name.endswith(".zip"):
                 with zipfile.ZipFile(file_path, 'r') as zip_ref:
                     zip_ref.extractall(temp_dir)
-                for pdf in temp_dir.glob("*.pdf"):
-                    pdf_paths.append(pdf)
+                pdf_paths += list(temp_dir.glob("*.pdf"))
             else:
                 pdf_paths.append(file_path)
 
@@ -123,27 +124,28 @@ if uploaded_files:
             for col in ["Paid", "Balance"]:
                 final_df[col] = final_df[col].astype(str).str.replace(r"[^\d.,]", "", regex=True).str.replace(",", "", regex=False).astype(float)
 
-            final_df["العدد"] = pd.to_numeric(final_df["العدد"], errors="coerce")
-            final_df["المجموع"] = final_df["المجموع"].astype(str).str.replace(r"[^\d.,]", "", regex=True).str.replace(",", "", regex=False).astype(float)
-            final_df["VAT 15% Calc"] = (final_df["المجموع"] * 0.15).round(2)
+            if "العدد" in final_df.columns:
+                final_df["العدد"] = pd.to_numeric(final_df["العدد"], errors="coerce")
+            if "المجموع" in final_df.columns:
+                final_df["المجموع"] = final_df["المجموع"].astype(str).str.replace(r"[^\d.,]", "", regex=True).str.replace(",", "", regex=False).astype(float)
+                final_df["VAT 15% Calc"] = (final_df["المجموع"] * 0.15).round(2)
+                final_df = final_df.rename(columns={
+                    "المجموع": "Total before tax",
+                    "سعر الوحدة": "Unit price",
+                    "العدد": "Quantity",
+                    "الوصف": "Description",
+                    "البند": "SKU"
+                })
+                final_df["Total after tax"] = (final_df["Total before tax"] + final_df["VAT 15% Calc"]).round(2)
 
-            final_df = final_df.rename(columns={
-                "المجموع": "Total before tax",
-                "سعر الوحدة": "Unit price",
-                "العدد": "Quantity",
-                "الوصف": "Description",
-                "البند": "SKU"
-            })
-
-            final_df["Total after tax"] = (final_df["Total before tax"] + final_df["VAT 15% Calc"]).round(2)
-
-            final_df = final_df[
-                [
-                    "Invoice Number", "Invoice Date", "Customer Name", "Address", "Paid", "Balance",
-                    "Total before tax", "VAT 15% Calc", "Total after tax",
-                    "Unit price", "Quantity", "Description", "SKU", "Source File"
-                ]
+            final_columns = [
+                "Invoice Number", "Invoice Date", "Customer Name", "Address", "Paid", "Balance",
+                "Total before tax", "VAT 15% Calc", "Total after tax",
+                "Unit price", "Quantity", "Description", "SKU", "Source File"
             ]
+
+            # Keep only available columns
+            final_df = final_df[[col for col in final_columns if col in final_df.columns]]
 
             # Export Excel
             output_excel = temp_dir / "Cleaned_Combined_Tables.xlsx"
