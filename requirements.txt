@@ -3,5 +3,6 @@ tabula-py
 pymupdf
 pandas
 openpyxl
+jpype1
 arabic-reshaper
 python-bidi
