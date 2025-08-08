@@ -1,113 +1,101 @@
-# streamlit_app.py
-
 import streamlit as st
-import os
-import shutil
 import fitz  # PyMuPDF
+import pdfplumber
 import pandas as pd
 import re
 import tempfile
 import zipfile
 from pathlib import Path
 
-# =========================
+# ======================
 # Helper Functions
-# =========================
+# ======================
+
+def is_data_row(row):
+    """Check if row contains at least one number (Arabic or English)"""
+    return any(
+        str(cell).replace(",", "").replace("٫", ".").replace("٬", ".").replace(" ", "").isdigit()
+        for cell in row
+    )
 
 def find_field(text, keyword):
-    pattern = rf"{keyword}[:\s]*([^\n]*)"
+    """Find field value following a keyword (e.g. 'رقم الفاتورة: 123')"""
+    pattern = rf"{keyword}\s*[:：]?\s*(.+)"
     match = re.search(pattern, text)
-    return match.group(1).strip() if match else ""
+    return match.group(1).strip() if match else None
 
-def process_pdf(pdf_path, safe_folder):
-    try:
-        with fitz.open(pdf_path) as doc:
-            full_text = "\n".join([page.get_text() for page in doc])
+def extract_text_fields(pdf_path):
+    """Extract key Arabic metadata fields from PDF"""
+    with fitz.open(pdf_path) as doc:
+        text = "\n".join(page.get_text() for page in doc)
+        return {
+            "اسم العميل": find_field(text, "اسم العميل"),
+            "رقم الفاتورة": find_field(text, "رقم الفاتورة"),
+            "العنوان": find_field(text, "العنوان"),
+        }
 
-        invoice_number = find_field(full_text, "رقم الفاتورة")
-        invoice_date = find_field(full_text, "تاريخ الفاتورة")
-        customer_name = find_field(full_text, "فاتورة ضريبية")
-        address_part2 = find_field(full_text, "العنوان")
-        address_part1 = find_field(full_text, "رقم السجل")
-        address = f"{address_part1} {address_part2}".strip()
-        paid_value = find_field(full_text, "مدفوع")
-        balance_value = find_field(full_text, "الرصيد المستحق")
+def extract_tables_from_pdf(pdf_path):
+    """Extract tables using pdfplumber and filter numeric rows"""
+    combined_rows = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            tables = page.extract_tables()
+            for table in tables:
+                cleaned = [row for row in table if is_data_row(row)]
+                if cleaned:
+                    combined_rows.extend(cleaned)
+    return pd.DataFrame(combined_rows) if combined_rows else None
 
-        ascii_name = f"bill_{pdf_path.stem.encode('ascii', errors='ignore').decode()}.pdf"
-        safe_pdf_path = safe_folder / ascii_name
-        shutil.copy(pdf_path, safe_pdf_path)
+def save_temp_file(uploaded_file):
+    """Save uploaded file to a temporary file and return path"""
+    suffix = Path(uploaded_file.name).suffix
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(uploaded_file.read())
+        return tmp.name
 
-        return pd.DataFrame([{
-            "Invoice Number": invoice_number,
-            "Invoice Date": invoice_date,
-            "Customer Name": customer_name,
-            "Address": address,
-            "Paid": paid_value,
-            "Balance": balance_value,
-            "Source File": pdf_path.name
-        }])
-    except Exception as e:
-        st.error(f"❌ Error in {pdf_path.name}: {e}")
-        return pd.DataFrame()
+# ======================
+# Streamlit UI
+# ======================
+st.title("📄 Arabic PDF Invoice Extractor")
 
-# =========================
-# Streamlit App UI
-# =========================
-
-st.title("📄 Arabic Invoice Field Extractor")
-
-uploaded_files = st.file_uploader("Upload PDF files or a ZIP of PDFs", type=["pdf", "zip"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload PDF files or ZIP", type=["pdf", "zip"], accept_multiple_files=True)
 
 if uploaded_files:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_dir = Path(temp_dir)
-        pdf_paths = []
+    with st.spinner("Processing..."):
+        temp_folder = Path(tempfile.mkdtemp())
+        all_dfs = []
 
-        # Unpack and handle ZIP or single/multiple PDFs
         for uploaded_file in uploaded_files:
-            file_path = temp_dir / uploaded_file.name
-            with open(file_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-
             if uploaded_file.name.endswith(".zip"):
-                with zipfile.ZipFile(file_path, 'r') as zip_ref:
-                    zip_ref.extractall(temp_dir)
-                for pdf in temp_dir.glob("*.pdf"):
-                    pdf_paths.append(pdf)
+                zip_path = save_temp_file(uploaded_file)
+                with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                    zip_ref.extractall(temp_folder)
+                pdf_paths = list(temp_folder.rglob("*.pdf"))
             else:
-                pdf_paths.append(file_path)
+                pdf_path = save_temp_file(uploaded_file)
+                pdf_paths = [Path(pdf_path)]
 
-        # Safe temp folder
-        safe_folder = temp_dir / "safe"
-        safe_folder.mkdir(exist_ok=True)
+            for pdf_path in pdf_paths:
+                try:
+                    fields = extract_text_fields(str(pdf_path))
+                    table_df = extract_tables_from_pdf(str(pdf_path))
+                    if table_df is not None:
+                        for k, v in fields.items():
+                            table_df[k] = v
+                        table_df["اسم الملف"] = pdf_path.name
+                        all_dfs.append(table_df)
+                    else:
+                        st.warning(f"⚠️ No valid tables found in: {pdf_path.name}")
+                except Exception as e:
+                    st.error(f"❌ Error in {pdf_path.name}: {e}")
 
-        all_rows = []
-        for pdf_path in pdf_paths:
-            st.write(f"📄 Processing: {pdf_path.name}")
-            extracted_df = process_pdf(pdf_path, safe_folder)
-            if not extracted_df.empty:
-                all_rows.append(extracted_df)
+        if all_dfs:
+            result_df = pd.concat(all_dfs, ignore_index=True)
+            st.success(f"✅ Extracted {len(result_df)} rows from {len(all_dfs)} files.")
+            st.dataframe(result_df)
 
-        if all_rows:
-            final_df = pd.concat(all_rows, ignore_index=True)
+            output_path = temp_folder / "cleaned_output.xlsx"
+            result_df.to_excel(output_path, index=False)
 
-            # Cleaning
-            final_df["Customer Name"] = final_df["Customer Name"].astype(str).str.replace(r"اسم العميل\s*[:：]?\s*", "", regex=True).str.strip(" :：﹕")
-            final_df["Address"] = final_df["Address"].astype(str).str.replace(r"العنوان\s*[:：]?\s*", "", regex=True).str.strip(" :：﹕")
-
-            for col in ["Paid", "Balance"]:
-                final_df[col] = final_df[col].astype(str).str.replace(r"[^\d.,]", "", regex=True).str.replace(",", "", regex=False)
-                final_df[col] = pd.to_numeric(final_df[col], errors="coerce")
-
-            final_df = final_df[[
-                "Invoice Number", "Invoice Date", "Customer Name", "Address", "Paid", "Balance", "Source File"
-            ]]
-
-            # Export Excel
-            output_excel = temp_dir / "Cleaned_Invoice_Metadata.xlsx"
-            final_df.to_excel(output_excel, index=False)
-
-            st.success("✅ Field extraction complete!")
-            st.download_button("📥 Download Extracted Excel", output_excel.read_bytes(), file_name="Cleaned_Invoices_Metadata.xlsx")
-        else:
-            st.warning("⚠️ No valid invoice fields found.")
+            with open(output_path, "rb") as f:
+                st.download_button("⬇️ Download Excel File", f, file_name="cleaned_output.xlsx")
