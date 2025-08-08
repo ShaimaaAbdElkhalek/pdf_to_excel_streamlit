@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: pdf-cleaner-app
+    name: pdf_to_excel_streamlit
     env: python
     plan: free
     buildCommand: |
