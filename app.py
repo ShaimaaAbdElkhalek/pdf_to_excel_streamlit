@@ -54,7 +54,8 @@ def extract_metadata(pdf_path):
             "Source File": pdf_path.name
         }
 
-        return {k: reshape_arabic_text(v) for k, v in metadata.items()}
+        return metadata
+
 
     except Exception as e:
         st.error(f"❌ Error extracting metadata from {pdf_path.name}: {e}")
