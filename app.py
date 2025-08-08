@@ -56,7 +56,6 @@ def extract_metadata(pdf_path):
 
         return metadata
 
-
     except Exception as e:
         st.error(f"❌ Error extracting metadata from {pdf_path.name}: {e}")
         return {}
@@ -169,6 +168,51 @@ if uploaded_files:
 
         if all_data:
             final_df = pd.concat(all_data, ignore_index=True)
+
+            # =========================
+            # Clean + Postprocess
+            # =========================
+
+            # --- Clean Customer Name ---
+            final_df["customer_name"] = (
+                final_df["customer_name"].astype(str)
+                .str.replace(r"اسم العميل\s*[:：]?\s*", "", regex=True)
+                .str.strip(" :：﹕")
+            )
+
+            # --- Clean Address ---
+            final_df["address"] = (
+                final_df["address"].astype(str)
+                .str.replace(r"العنوان\s*[:：]?\s*", "", regex=True)
+                .str.strip(" :：﹕")
+            )
+
+            # --- Clean Paid and Balance to float ---
+            for col in ["paid_value", "balance_value"]:
+                final_df[col] = (
+                    final_df[col].astype(str)
+                    .str.replace(r"[^\d.,]", "", regex=True)
+                    .str.replace(",", "", regex=False)
+                    .astype(float)
+                )
+
+            # --- Rename Columns ---
+            final_df = final_df.rename(columns={
+                "المجموع": "Total before tax",
+                "سعر الوحدة": "Unit price",
+                "العدد": "Quantity",
+                "الوصف": "Description",
+                "البند": "SKU"
+            })
+
+            # --- Calculate VAT 15% ---
+            final_df["VAT 15% Calc"] = (final_df["Total before tax"] * 0.15).round(2)
+
+            # --- Total After Tax ---
+            final_df["Total after tax"] = (final_df["Total before tax"] + final_df["VAT 15% Calc"]).round(2)
+
+            # =========================
+
             st.success("✅ Extraction complete!")
             st.dataframe(final_df)
 
