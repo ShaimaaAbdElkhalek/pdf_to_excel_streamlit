@@ -4,5 +4,6 @@ pymupdf
 pandas
 openpyxl
 jpype1
+subprocess
 arabic-reshaper
 python-bidi
