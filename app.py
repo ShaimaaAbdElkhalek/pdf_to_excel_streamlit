@@ -3,7 +3,7 @@
 import streamlit as st
 import os
 import shutil
-import pdfplumber
+import tabula
 import fitz  # PyMuPDF
 import pandas as pd
 import re
@@ -16,24 +16,12 @@ from pathlib import Path
 # =========================
 
 def is_data_row(row):
-    return any(str(cell).replace(",", "").replace("٫", ".").replace("\u066c", ".").replace(" ", "").isdigit() for cell in row)
+    return any(str(cell).replace(",", "").replace("٫", ".").replace("٬", ".").replace(" ", "").isdigit() for cell in row)
 
 def find_field(text, keyword):
     pattern = rf"{keyword}[:\s]*([^\n]*)"
     match = re.search(pattern, text)
     return match.group(1).strip() if match else ""
-
-def extract_tables_with_pdfplumber(pdf_path):
-    rows = []
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages:
-                table = page.extract_table()
-                if table:
-                    rows.extend(table)
-    except Exception as e:
-        st.error(f"Error reading tables with pdfplumber in {pdf_path.name}: {e}")
-    return rows
 
 def process_pdf(pdf_path, safe_folder):
     all_rows = []
@@ -54,39 +42,39 @@ def process_pdf(pdf_path, safe_folder):
         safe_pdf_path = safe_folder / ascii_name
         shutil.copy(pdf_path, safe_pdf_path)
 
-        table_rows = extract_tables_with_pdfplumber(safe_pdf_path)
+        tables = tabula.read_pdf(str(safe_pdf_path), pages='all', multiple_tables=True, stream=True)
 
-        merged_rows = []
-        temp_row = []
+        for table in tables:
+            if not table.empty:
+                merged_rows = []
+                temp_row = []
 
-        for row_values in table_rows:
-            row_values = [cell if cell else "" for cell in row_values]
+                for _, row in table.iterrows():
+                    row_values = row.fillna("").astype(str).tolist()
 
-            if is_data_row(row_values):
-                if temp_row:
-                    combined = [temp_row[0] + " " + row_values[0]] + row_values[1:]
-                    merged_rows.append(combined)
-                    temp_row = []
-                else:
-                    merged_rows.append(row_values)
-            else:
-                temp_row = row_values
+                    if is_data_row(row_values):
+                        if temp_row:
+                            combined = [temp_row[0] + " " + row_values[0]] + row_values[1:]
+                            merged_rows.append(combined)
+                            temp_row = []
+                        else:
+                            merged_rows.append(row_values)
+                    else:
+                        temp_row = row_values
 
-        if merged_rows:
-            headers = ["المجموع", "الكمية", "سعر الوحدة", "العدد", "الوصف", "البند"]
-            df_merged = pd.DataFrame(merged_rows, columns=headers[:len(merged_rows[0])])
-            df_merged["Invoice Number"] = invoice_number
-            df_merged["Invoice Date"] = invoice_date
-            df_merged["Customer Name"] = customer_name
-            df_merged["Address"] = address
-            df_merged["Paid"] = paid_value
-            df_merged["Balance"] = balance_value
-            df_merged["Source File"] = pdf_path.name
-            all_rows.append(df_merged)
-
+                if merged_rows:
+                    headers = ["المجموع", "الكمية", "سعر الوحدة", "العدد", "الوصف", "البند"]
+                    df_merged = pd.DataFrame(merged_rows, columns=headers[:len(merged_rows[0])])
+                    df_merged["Invoice Number"] = invoice_number
+                    df_merged["Invoice Date"] = invoice_date
+                    df_merged["Customer Name"] = customer_name
+                    df_merged["Address"] = address
+                    df_merged["Paid"] = paid_value
+                    df_merged["Balance"] = balance_value
+                    df_merged["Source File"] = pdf_path.name
+                    all_rows.append(df_merged)
     except Exception as e:
         st.error(f"❌ Error in {pdf_path.name}: {e}")
-
     return all_rows
 
 # =========================
@@ -102,6 +90,7 @@ if uploaded_files:
         temp_dir = Path(temp_dir)
         pdf_paths = []
 
+        # Unpack and handle ZIP or single/multiple PDFs
         for uploaded_file in uploaded_files:
             file_path = temp_dir / uploaded_file.name
             with open(file_path, "wb") as f:
@@ -115,6 +104,7 @@ if uploaded_files:
             else:
                 pdf_paths.append(file_path)
 
+        # Safe temp folder
         safe_folder = temp_dir / "safe"
         safe_folder.mkdir(exist_ok=True)
 
@@ -127,6 +117,7 @@ if uploaded_files:
         if all_rows:
             final_df = pd.concat(all_rows, ignore_index=True)
 
+            # Cleaning
             final_df["Customer Name"] = final_df["Customer Name"].astype(str).str.replace(r"اسم العميل\s*[:：]?\s*", "", regex=True).str.strip(" :：﹕")
             final_df["Address"] = final_df["Address"].astype(str).str.replace(r"العنوان\s*[:：]?\s*", "", regex=True).str.strip(" :：﹕")
 
@@ -155,6 +146,7 @@ if uploaded_files:
                 ]
             ]
 
+            # Export Excel
             output_excel = temp_dir / "Cleaned_Combined_Tables.xlsx"
             final_df.to_excel(output_excel, index=False)
 
