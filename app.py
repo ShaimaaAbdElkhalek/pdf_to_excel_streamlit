@@ -40,15 +40,16 @@ def extract_metadata(pdf_path):
             return match.group(1).strip() if match else ""
 
         metadata = {
-            "رقم الفاتورة": find_field(full_text, "رقم الفاتورة"),
-            "تاريخ الفاتورة": find_field(full_text, "تاريخ الفاتورة"),
-            "اسم العميل": find_field(full_text, "اسم العميل"),
-            "العنوان": find_field(full_text, "العنوان"),
-            "رقم السجل": find_field(full_text, "رقم السجل"),
-            "المدفوع": find_field(full_text, "مدفوع"),
-            "الرصيد المستحق": find_field(full_text, "الرصيد المستحق"),
-            "Source File": pdf_path.name
-        }
+                "invoice_number": find_field(full_text, "رقم الفاتورة"),
+                "invoice_date": find_field(full_text, "تاريخ الفاتورة"),
+                "customer_name": find_field(full_text, "فاتورة ضريبية"),
+                "address_part2": find_field(full_text, "العنوان"),
+                "address_part1": find_field(full_text, "رقم السجل"),
+                "address": f"{address_part1} {address_part2}".strip(),
+                "paid_value": find_field(full_text, "مدفوع"),
+                "balance_value": find_field(full_text, "الرصيد المستحق"),
+                "Source File": pdf_path.name
+            }
 
         return {k: reshape_arabic_text(v) for k, v in metadata.items()}
 
