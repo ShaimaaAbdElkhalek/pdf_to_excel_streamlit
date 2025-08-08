@@ -3,3 +3,5 @@ PyMuPDF
 pdfplumber
 pandas
 openpyxl
+python-bidi
+arabic_reshaper
