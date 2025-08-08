@@ -1,4 +1,4 @@
-import streamlit as st
+import streamlit as st 
 import os
 import fitz  # PyMuPDF
 import pdfplumber
@@ -7,10 +7,20 @@ import re
 import tempfile
 import zipfile
 from pathlib import Path
+import arabic_reshaper
+from bidi.algorithm import get_display
 
 # ======================
 # Helper Functions
 # ======================
+
+def reshape_arabic_text(text):
+    try:
+        reshaped = arabic_reshaper.reshape(text)
+        bidi_text = get_display(reshaped)
+        return bidi_text
+    except:
+        return text
 
 def is_data_row(row):
     return any(
@@ -31,13 +41,12 @@ def extract_fields_from_text(text):
     for key, pattern in patterns.items():
         match = re.search(pattern, text)
         if match:
-            fields[key] = match.group(1).strip()
+            value = match.group(1).strip()
+            fields[key] = reshape_arabic_text(value)
     return fields
 
 def fix_shifted_rows(row):
-    # Fix case when "العدد" is empty but next column contains data
     if len(row) == 7 and row[3].strip() == "" and row[4].strip() != "":
-        # Merge columns 4 and 5 into 4, shift left
         row[3] = row[4]
         row[4] = row[5]
         row[5] = row[6]
@@ -51,7 +60,11 @@ def process_pdf(pdf_path):
     with pdfplumber.open(pdf_path) as pdf:
         full_text = ""
         for page in pdf.pages:
-            full_text += page.extract_text() + "\n"
+            extracted_text = page.extract_text()
+            if extracted_text:
+                reshaped_text = reshape_arabic_text(extracted_text)
+                full_text += reshaped_text + "\n"
+
         fields = extract_fields_from_text(full_text)
 
         for page in pdf.pages:
@@ -68,6 +81,7 @@ def process_pdf(pdf_path):
 
                     for _, row in df.iterrows():
                         row_values = row.fillna("").astype(str).tolist()
+                        row_values = [reshape_arabic_text(cell) for cell in row_values]
                         row_values = fix_shifted_rows(row_values)
 
                         if is_data_row(row_values):
