@@ -4,5 +4,6 @@ pymupdf
 pdfplumber  
 pandas
 openpyxl
+camelot
 arabic-reshaper
 python-bidi
