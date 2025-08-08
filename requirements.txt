@@ -1,6 +1,7 @@
 streamlit
 tabula-py
 pymupdf
+pdfplumber  
 pandas
 openpyxl
 arabic-reshaper
