@@ -1,5 +1,6 @@
 streamlit
-tabula-py
-pymupdf
 pandas
-openpyxl
+pdfplumber
+PyMuPDF
+arabic-reshaper
+python-bidi
