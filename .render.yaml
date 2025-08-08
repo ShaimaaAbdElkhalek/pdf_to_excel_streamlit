@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: pdf-cleaner-app
+    env: python
+    plan: free
+    buildCommand: |
+      ./install_java.sh
+      pip install -r requirements.txt
+    startCommand: streamlit run streamlit_app.py --server.port=10000 --server.address=0.0.0.0
