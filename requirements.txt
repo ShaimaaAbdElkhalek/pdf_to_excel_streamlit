@@ -3,7 +3,5 @@ tabula-py
 pymupdf
 pandas
 openpyxl
-
-subprocess
 arabic-reshaper
 python-bidi
