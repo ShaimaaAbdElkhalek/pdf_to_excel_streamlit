@@ -1,6 +1,4 @@
 
-
-
 # streamlit_app.py
 
 import streamlit as st
@@ -42,14 +40,15 @@ def extract_metadata(pdf_path):
             match = re.search(pattern, text)
             return match.group(1).strip() if match else ""
 
-       
+        address_part1 = find_field(full_text, "رقم السجل")
+        address_part2 = find_field(full_text, "العنوان")
 
         metadata = {
             "invoice_number": find_field(full_text, "رقم الفاتورة"),
             "invoice_date": find_field(full_text, "تاريخ الفاتورة"),
             "customer_name": find_field(full_text, "فاتورة ضريبية"),
-            "address_part1": find_field(full_text, "رقم السجل"),
-            "address_part2": find_field(full_text, "العنوان"),
+            "address_part1": address_part1,
+            "address_part2": address_part2,
             "address": f"{address_part1} {address_part2}".strip(),
             "paid_value": find_field(full_text, "مدفوع"),
             "balance_value": find_field(full_text, "الرصيد المستحق"),
