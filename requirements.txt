@@ -1,7 +1,5 @@
 streamlit
-pandas
 tabula-py
-PyMuPDF
+pymupdf
+pandas
 openpyxl
-pdfplumber
-camelot
