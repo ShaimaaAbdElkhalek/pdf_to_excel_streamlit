@@ -40,27 +40,6 @@ def extract_metadata(pdf_path):
         address_part1 = find_field(full_text, "رقم السجل")
         address_part2 = find_field(full_text, "العنوان")
 
-        # Extract "Total before tax" (English or Arabic label)
-        total_before_tax = find_field(full_text, "Total before tax")
-        if not total_before_tax:  # fallback to Arabic
-            total_before_tax = find_field(full_text, "الإجمالي قبل الضريبة")
-
-        # Clean and convert to number
-        total_before_tax_num = (
-            str(total_before_tax)
-            .replace(",", "")
-            .replace("٫", ".")
-            .replace("٬", ".")
-        )
-        try:
-            total_before_tax_num = float(total_before_tax_num)
-        except:
-            total_before_tax_num = None
-
-        # VAT and Total After Tax
-        vat_15 = total_before_tax_num * 0.15 if total_before_tax_num is not None else None
-        total_after_tax = (total_before_tax_num + vat_15) if vat_15 is not None else None
-
         metadata = {
             "invoice_number": find_field(full_text, "رقم الفاتورة"),
             "invoice_date": find_field(full_text, "تاريخ الفاتورة"),
@@ -70,12 +49,8 @@ def extract_metadata(pdf_path):
             "address": f"{address_part1} {address_part2}".strip(),
             "paid_value": find_field(full_text, "مدفوع"),
             "balance_value": find_field(full_text, "الرصيد المستحق"),
-            "Total before tax": total_before_tax_num,
-            "VAT 15%": vat_15,
-            "Total after tax": total_after_tax,
             "Source File": pdf_path.name
         }
-
         return metadata
 
     except Exception as e:
@@ -146,11 +121,31 @@ def process_pdf(pdf_path):
     table_data = extract_tables(pdf_path)
 
     if not table_data.empty:
+        # Add metadata columns
         for key, value in metadata.items():
             table_data[key] = value
+
+        # Ensure numeric conversion for VAT calculation
+        if "Total before tax" in table_data.columns:
+            table_data["Total before tax"] = (
+                table_data["Total before tax"]
+                .astype(str)
+                .str.replace(",", "")
+                .str.replace("٫", ".")
+                .str.replace("٬", ".")
+            )
+            table_data["Total before tax"] = pd.to_numeric(table_data["Total before tax"], errors="coerce")
+
+            # Calculate VAT (15%) and Total after tax
+            table_data["VAT 15%"] = table_data["Total before tax"] * 0.15
+            table_data["Total after tax"] = table_data["Total before tax"] + table_data["VAT 15%"]
+
         return table_data
     else:
-        return pd.DataFrame([metadata])  # if no table, return metadata only
+        df = pd.DataFrame([metadata])
+        df["VAT 15%"] = ""
+        df["Total after tax"] = ""
+        return df
 
 # =========================
 # Streamlit App UI
@@ -192,6 +187,7 @@ if uploaded_files:
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
                 final_df.to_excel(tmp.name, index=False)
-                st.download_button("📥 Download Excel", tmp.name, file_name="Merged_Invoice_Data.xlsx")
+                st.download_button("📥 Download Excel", tmp.name, file_name="Merged_Invoice_Data_with_VAT.xlsx")
+
         else:
             st.warning("⚠️ No data extracted from the uploaded files.")
