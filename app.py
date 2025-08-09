@@ -199,7 +199,7 @@ if uploaded_files:
 
             # ======== Keep only required columns in order ========
             required_columns = [
-                "Invoice Number", "Invoice Date", "Customer Name", "Address", "Paid", "Balance", "Phone_number",
+                "Invoice Number", "Invoice Date", "Customer Name", "Address", "Paid", "Balance", 
                 "Total before tax", "VAT 15% Calc", "Total after tax",
                 "Unit price", "Quantity", "Description", "SKU",
                 "Source File"
