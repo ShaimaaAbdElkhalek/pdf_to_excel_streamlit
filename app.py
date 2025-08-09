@@ -9,7 +9,7 @@ import re
 import tempfile
 import zipfile
 from pathlib import Path
-import shutil
+from io import BytesIO
 import arabic_reshaper
 from bidi.algorithm import get_display
 
@@ -181,14 +181,14 @@ if uploaded_files:
 
             # ======== Cleaning Steps ========
 
-            # 1. Clean "Total before tax" - keep only numbers & decimals and convert to float
+            # 1. Clean "Total before tax"
             if "Total before tax" in final_df.columns:
                 final_df["Total before tax"] = (
                     final_df["Total before tax"].astype(str)
-                    .str.replace(r"[^\d.,]", "", regex=True)  # remove letters & symbols
-                    .str.replace(",", "", regex=False)        # remove commas
-                    .replace("", None)                        # empty → None
-                    .astype(float)                            # convert to float
+                    .str.replace(r"[^\d.,]", "", regex=True)
+                    .str.replace(",", "", regex=False)
+                    .replace("", None)
+                    .astype(float)
                 )
 
                 # 2. Calculate VAT 15%
@@ -211,9 +211,17 @@ if uploaded_files:
             st.success("✅ Extraction & cleaning complete!")
             st.dataframe(final_df)
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
-                final_df.to_excel(tmp.name, index=False)
-                st.download_button("📥 Download Excel", tmp.name, file_name="Merged_Invoice_Data.xlsx")
+            # ======== FIX: Proper Excel Download ========
+            output = BytesIO()
+            final_df.to_excel(output, index=False, engine="openpyxl")
+            output.seek(0)
+
+            st.download_button(
+                label="📥 Download Excel",
+                data=output,
+                file_name="Merged_Invoice_Data.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
         else:
             st.warning("⚠️ No data extracted from the uploaded files.")
