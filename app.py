@@ -171,16 +171,23 @@ if uploaded_files:
 
             # ======== Cleaning Steps ========
 
-            # 1. Clean "Total before tax" - keep only numbers & decimals
+            # 1. Clean "Total before tax" - keep only numbers & decimals and convert to float
             if "Total before tax" in final_df.columns:
                 final_df["Total before tax"] = (
                     final_df["Total before tax"].astype(str)
-                    .str.replace(r"[^\d.,]", "", regex=True)  # remove all letters & symbols
+                    .str.replace(r"[^\d.,]", "", regex=True)  # remove letters & symbols
                     .str.replace(",", "", regex=False)        # remove commas
                     .replace("", None)                        # empty → None
+                    .astype(float)                            # convert to float
                 )
 
-            # 2. Convert Paid and Balance to float
+                # 2. Calculate VAT 15%
+                final_df["VAT 15%"] = (final_df["Total before tax"] * 0.15).round(2)
+
+                # 3. Calculate Total after tax
+                final_df["Total after tax"] = (final_df["Total before tax"] + final_df["VAT 15%"]).round(2)
+
+            # 4. Convert Paid and Balance to float
             for col in ["Paid", "Balance"]:
                 if col in final_df.columns:
                     final_df[col] = (
