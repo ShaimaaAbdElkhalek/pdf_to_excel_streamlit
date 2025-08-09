@@ -9,6 +9,7 @@ import re
 import tempfile
 import zipfile
 from pathlib import Path
+import shutil
 import arabic_reshaper
 from bidi.algorithm import get_display
 
@@ -132,6 +133,25 @@ def process_pdf(pdf_path):
         return pd.DataFrame([metadata])  # if no table, return metadata only
 
 # =========================
+# Number Cleaning for VAT
+# =========================
+
+def clean_number(x):
+    if pd.isna(x):
+        return None
+    x = str(x).strip()
+    # Replace Arabic decimal and thousand separators
+    x = x.replace("٫", ".").replace("٬", "").replace(",", "")
+    # Replace Arabic digits with Western digits
+    arabic_digits = "٠١٢٣٤٥٦٧٨٩"
+    for i, d in enumerate(arabic_digits):
+        x = x.replace(d, str(i))
+    try:
+        return float(x)
+    except:
+        return None
+
+# =========================
 # Streamlit App UI
 # =========================
 
@@ -168,14 +188,11 @@ if uploaded_files:
         if all_data:
             final_df = pd.concat(all_data, ignore_index=True)
 
-            # --- Calculate VAT 15% and Total after tax ---
+            # ✅ Clean and calculate VAT
             if "Total before tax" in final_df.columns:
-                final_df["VAT 15% Calc"] = pd.to_numeric(final_df["Total before tax"], errors="coerce") * 0.15
-                final_df["VAT 15% Calc"] = final_df["VAT 15% Calc"].round(2)
-
-                final_df["Total after tax"] = (
-                    pd.to_numeric(final_df["Total before tax"], errors="coerce") + final_df["VAT 15% Calc"]
-                ).round(2)
+                final_df["Total before tax"] = final_df["Total before tax"].apply(clean_number)
+                final_df["VAT 15% Calc"] = (final_df["Total before tax"] * 0.15).round(2)
+                final_df["Total after tax"] = (final_df["Total before tax"] + final_df["VAT 15% Calc"]).round(2)
 
             st.success("✅ Extraction complete!")
             st.dataframe(final_df)
