@@ -45,7 +45,7 @@ def extract_metadata(pdf_path):
         metadata = {
             "invoice_number": find_field(full_text, "رقم الفاتورة"),
             "invoice_date": find_field(full_text, "تاريخ الفاتورة"),
-            "customer_name": find_field(full_text, "فاتورة ضريبية"),  # No cleaning applied
+            "customer_name": find_field(full_text, "فاتورة ضريبية"),  # no cleaning here
             "address_part1": address_part1,
             "address_part2": address_part2,
             "address": f"{address_part1} {address_part2}".strip(),
@@ -133,38 +133,6 @@ def process_pdf(pdf_path):
         return pd.DataFrame([metadata])  # if no table, return metadata only
 
 # =========================
-# Cleaning Function
-# =========================
-
-def clean_dataframe(df):
-    # 1. Remove "المجموع" from Total before tax
-    if "Total before tax" in df.columns:
-        df["Total before tax"] = df["Total before tax"].astype(str).str.replace("المجموع", "", regex=False).str.strip()
-
-    # 2. No cleaning for Customer Name (skipped)
-
-    # 3. Clean Address column
-    if "address" in df.columns:
-        df["address"] = (
-            df["address"]
-            .astype(str)
-            .str.replace(r"العنوان\s*[:：]?\s*", "", regex=True)
-            .str.strip(" :：﹕")
-        )
-
-    # 4. Convert Paid and Balance to float
-    for col in ["Paid", "Balance"]:
-        if col in df.columns:
-            df[col] = (
-                df[col].astype(str)
-                .str.replace(r"[^\d.,]", "", regex=True)
-                .str.replace(",", "", regex=False)
-                .astype(float)
-            )
-
-    return df
-
-# =========================
 # Streamlit App UI
 # =========================
 
@@ -200,7 +168,28 @@ if uploaded_files:
 
         if all_data:
             final_df = pd.concat(all_data, ignore_index=True)
-            final_df = clean_dataframe(final_df)  # <<< Cleaning before displaying
+
+            # ======== Cleaning Steps ========
+
+            # 1. Clean "Total before tax" - keep only numbers & decimals
+            if "Total before tax" in final_df.columns:
+                final_df["Total before tax"] = (
+                    final_df["Total before tax"].astype(str)
+                    .str.replace(r"[^\d.,]", "", regex=True)  # remove all letters & symbols
+                    .str.replace(",", "", regex=False)        # remove commas
+                    .replace("", None)                        # empty → None
+                )
+
+            # 2. Convert Paid and Balance to float
+            for col in ["Paid", "Balance"]:
+                if col in final_df.columns:
+                    final_df[col] = (
+                        final_df[col].astype(str)
+                        .str.replace(r"[^\d.,]", "", regex=True)
+                        .str.replace(",", "", regex=False)
+                        .replace("", None)
+                        .astype(float)
+                    )
 
             st.success("✅ Extraction & cleaning complete!")
             st.dataframe(final_df)
