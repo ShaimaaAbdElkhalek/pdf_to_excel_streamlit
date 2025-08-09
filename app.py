@@ -42,13 +42,23 @@ def extract_metadata(pdf_path):
         address_part1 = find_field(full_text, "رقم السجل")
         address_part2 = find_field(full_text, "العنوان")
 
+        # === Clean customer_name ===
+        raw_customer = find_field(full_text, "فاتورة ضريبية")
+        raw_customer = re.sub(r"اسم العميل.*", "", raw_customer).strip()  # remove 'اسم العميل' and after
+        raw_customer = re.sub(r":.*", "", raw_customer).strip()            # remove ':' and after
+
+        # === Clean address ===
+        full_address = f"{address_part1} {address_part2}".strip()
+        full_address = re.sub(r"العنوان.*", "", full_address).strip()      # remove 'العنوان' and after
+        full_address = re.sub(r":.*", "", full_address).strip()             # remove ':' and after
+
         metadata = {
             "invoice_number": find_field(full_text, "رقم الفاتورة"),
             "invoice_date": find_field(full_text, "تاريخ الفاتورة"),
-            "customer_name": find_field(full_text, "فاتورة ضريبية"),  # no cleaning here
+            "customer_name": raw_customer,
             "address_part1": address_part1,
             "address_part2": address_part2,
-            "address": f"{address_part1} {address_part2}".strip(),
+            "address": full_address,
             "Paid": find_field(full_text, "مدفوع"),
             "Balance": find_field(full_text, "الرصيد المستحق"),
             "Source File": pdf_path.name
