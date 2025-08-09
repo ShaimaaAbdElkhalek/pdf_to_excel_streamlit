@@ -143,7 +143,7 @@ def process_pdf(pdf_path):
 # =========================
 
 st.set_page_config(page_title="Merged Arabic Invoice Extractor", layout="wide")
-st.title("📄 Arabic Invoice Extractor")
+st.title("📄 Invoice Extractor Pdf to Excel")
 
 uploaded_files = st.file_uploader("Upload PDF files", type=["pdf", "zip"], accept_multiple_files=True)
 
