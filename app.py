@@ -51,10 +51,10 @@ def extract_metadata(pdf_path):
         full_address = f"{address_part1} {address_part2}".strip()
 
         metadata = {
-            "invoice_number": find_field(full_text, "رقم الفاتورة"),
-            "invoice_date": find_field(full_text, "تاريخ الفاتورة"),
-            "customer_name": raw_customer,
-            "address": full_address,
+            "Invoice Number": find_field(full_text, "رقم الفاتورة"),
+            "Invoice Date": find_field(full_text, "تاريخ الفاتورة"),
+            "Customer Name": raw_customer,
+            "Address": full_address,
             "Paid": find_field(full_text, "مدفوع"),
             "Balance": find_field(full_text, "الرصيد المستحق"),
             "Source File": pdf_path.name
@@ -200,18 +200,12 @@ if uploaded_files:
             # ======== Keep only required columns in order ========
             required_columns = [
                 "Invoice Number", "Invoice Date", "Customer Name", "Address", "Paid", "Balance", 
-                "Total before tax", "VAT 15% Calc", "Total after tax",
+                "Total before tax", "VAT 15%", "Total after tax",
                 "Unit price", "Quantity", "Description", "SKU",
                 "Source File"
             ]
 
-            final_df = final_df.rename(columns={
-                "invoice_number": "Invoice Number",
-                "invoice_date": "Invoice Date",
-                "customer_name": "Customer Name",
-                "address": "Address",
-                "VAT 15%": "VAT 15% Calc"
-            })
+
 
             final_df = final_df.reindex(columns=required_columns)
 
