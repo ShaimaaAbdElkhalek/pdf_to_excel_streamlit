@@ -1,4 +1,3 @@
-
 # streamlit_app.py
 
 import streamlit as st
@@ -46,17 +45,16 @@ def extract_metadata(pdf_path):
         metadata = {
             "invoice_number": find_field(full_text, "رقم الفاتورة"),
             "invoice_date": find_field(full_text, "تاريخ الفاتورة"),
-            "customer_name": find_field(full_text, "فاتورة ضريبية"),
+            "customer_name": find_field(full_text, "فاتورة ضريبية"),  # no cleaning applied here
             "address_part1": address_part1,
             "address_part2": address_part2,
             "address": f"{address_part1} {address_part2}".strip(),
-            "paid_value": find_field(full_text, "مدفوع"),
-            "balance_value": find_field(full_text, "الرصيد المستحق"),
+            "Paid": find_field(full_text, "مدفوع"),
+            "Balance": find_field(full_text, "الرصيد المستحق"),
             "Source File": pdf_path.name
         }
 
         return metadata
-
 
     except Exception as e:
         st.error(f"❌ Error extracting metadata from {pdf_path.name}: {e}")
@@ -170,7 +168,37 @@ if uploaded_files:
 
         if all_data:
             final_df = pd.concat(all_data, ignore_index=True)
-            st.success("✅ Extraction complete!")
+
+            # ======== Cleaning Steps ========
+            # 1. Remove "المجموع" from Total before tax
+            if "Total before tax" in final_df.columns:
+                final_df["Total before tax"] = (
+                    final_df["Total before tax"].astype(str)
+                    .str.replace("المجموع", "", regex=False)
+                    .str.strip()
+                )
+
+            # 2. Customer Name cleaning is removed (no changes applied)
+
+            # 3. Clean Address column
+            if "address" in final_df.columns:
+                final_df["address"] = (
+                    final_df["address"].astype(str)
+                    .str.replace(r"العنوان\s*[:：]?\s*", "", regex=True)
+                    .str.strip(" :：﹕")
+                )
+
+            # 4. Convert Paid and Balance to float
+            for col in ["Paid", "Balance"]:
+                if col in final_df.columns:
+                    final_df[col] = (
+                        final_df[col].astype(str)
+                        .str.replace(r"[^\d.,]", "", regex=True)
+                        .str.replace(",", "", regex=False)
+                        .astype(float)
+                    )
+
+            st.success("✅ Extraction & cleaning complete!")
             st.dataframe(final_df)
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
