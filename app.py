@@ -16,7 +16,6 @@ from bidi.algorithm import get_display
 # =========================
 # Arabic Helpers
 # =========================
-
 def reshape_arabic_text(text):
     try:
         reshaped = arabic_reshaper.reshape(text)
@@ -28,7 +27,6 @@ def reshape_arabic_text(text):
 # =========================
 # Metadata Extraction (PyMuPDF)
 # =========================
-
 def extract_metadata(pdf_path):
     try:
         with fitz.open(pdf_path) as doc:
@@ -42,6 +40,27 @@ def extract_metadata(pdf_path):
         address_part1 = find_field(full_text, "رقم السجل")
         address_part2 = find_field(full_text, "العنوان")
 
+        # Extract "Total before tax" (English or Arabic label)
+        total_before_tax = find_field(full_text, "Total before tax")
+        if not total_before_tax:  # fallback to Arabic
+            total_before_tax = find_field(full_text, "الإجمالي قبل الضريبة")
+
+        # Clean and convert to number
+        total_before_tax_num = (
+            str(total_before_tax)
+            .replace(",", "")
+            .replace("٫", ".")
+            .replace("٬", ".")
+        )
+        try:
+            total_before_tax_num = float(total_before_tax_num)
+        except:
+            total_before_tax_num = None
+
+        # VAT and Total After Tax
+        vat_15 = total_before_tax_num * 0.15 if total_before_tax_num is not None else None
+        total_after_tax = (total_before_tax_num + vat_15) if vat_15 is not None else None
+
         metadata = {
             "invoice_number": find_field(full_text, "رقم الفاتورة"),
             "invoice_date": find_field(full_text, "تاريخ الفاتورة"),
@@ -51,6 +70,9 @@ def extract_metadata(pdf_path):
             "address": f"{address_part1} {address_part2}".strip(),
             "paid_value": find_field(full_text, "مدفوع"),
             "balance_value": find_field(full_text, "الرصيد المستحق"),
+            "Total before tax": total_before_tax_num,
+            "VAT 15%": vat_15,
+            "Total after tax": total_after_tax,
             "Source File": pdf_path.name
         }
 
@@ -63,7 +85,6 @@ def extract_metadata(pdf_path):
 # =========================
 # Table Extraction (pdfplumber)
 # =========================
-
 def is_data_row(row):
     return any(str(cell).replace(",", "").replace("٫", ".").replace("٬", ".").replace(" ", "").isdigit() for cell in row)
 
@@ -120,7 +141,6 @@ def extract_tables(pdf_path):
 # =========================
 # Main Process Function
 # =========================
-
 def process_pdf(pdf_path):
     metadata = extract_metadata(pdf_path)
     table_data = extract_tables(pdf_path)
@@ -133,30 +153,10 @@ def process_pdf(pdf_path):
         return pd.DataFrame([metadata])  # if no table, return metadata only
 
 # =========================
-# Number Cleaning for VAT
-# =========================
-
-def clean_number(x):
-    if pd.isna(x):
-        return None
-    x = str(x).strip()
-    # Replace Arabic decimal and thousand separators
-    x = x.replace("٫", ".").replace("٬", "").replace(",", "")
-    # Replace Arabic digits with Western digits
-    arabic_digits = "٠١٢٣٤٥٦٧٨٩"
-    for i, d in enumerate(arabic_digits):
-        x = x.replace(d, str(i))
-    try:
-        return float(x)
-    except:
-        return None
-
-# =========================
 # Streamlit App UI
 # =========================
-
 st.set_page_config(page_title="Merged Arabic Invoice Extractor", layout="wide")
-st.title("📄 Arabic Invoice Extractor (Fields + Table)")
+st.title("📄 Arabic Invoice Extractor (Fields + Table + VAT)")
 
 uploaded_files = st.file_uploader("Upload PDF files or ZIP", type=["pdf", "zip"], accept_multiple_files=True)
 
@@ -187,19 +187,11 @@ if uploaded_files:
 
         if all_data:
             final_df = pd.concat(all_data, ignore_index=True)
-
-            # ✅ Clean and calculate VAT
-            if "Total before tax" in final_df.columns:
-                final_df["Total before tax"] = final_df["Total before tax"].apply(clean_number)
-                final_df["VAT 15% Calc"] = (final_df["Total before tax"] * 0.15).round(2)
-                final_df["Total after tax"] = (final_df["Total before tax"] + final_df["VAT 15% Calc"]).round(2)
-
             st.success("✅ Extraction complete!")
             st.dataframe(final_df)
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
                 final_df.to_excel(tmp.name, index=False)
                 st.download_button("📥 Download Excel", tmp.name, file_name="Merged_Invoice_Data.xlsx")
-
         else:
             st.warning("⚠️ No data extracted from the uploaded files.")
