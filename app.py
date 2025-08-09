@@ -110,7 +110,7 @@ def extract_tables(pdf_path):
 
                         if merged_rows:
                             num_cols = len(merged_rows[0])
-                            headers = ["Total before tax", "Quantity", "Unit price", "العدد", "Description", "SKU", "إضافي"]
+                            headers = ["Total before tax", "الكمية", "Unit price", "Quantity", "Description", "SKU", "إضافي"]
                             df_cleaned = pd.DataFrame(merged_rows, columns=headers[:num_cols])
                             all_data.append(df_cleaned)
             return pd.concat(all_data, ignore_index=True) if all_data else pd.DataFrame()
