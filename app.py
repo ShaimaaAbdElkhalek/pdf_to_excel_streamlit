@@ -1,3 +1,4 @@
+
 # streamlit_app.py
 
 import streamlit as st
@@ -16,6 +17,7 @@ from bidi.algorithm import get_display
 # =========================
 # Arabic Helpers
 # =========================
+
 def reshape_arabic_text(text):
     try:
         reshaped = arabic_reshaper.reshape(text)
@@ -27,6 +29,7 @@ def reshape_arabic_text(text):
 # =========================
 # Metadata Extraction (PyMuPDF)
 # =========================
+
 def extract_metadata(pdf_path):
     try:
         with fitz.open(pdf_path) as doc:
@@ -51,7 +54,9 @@ def extract_metadata(pdf_path):
             "balance_value": find_field(full_text, "الرصيد المستحق"),
             "Source File": pdf_path.name
         }
+
         return metadata
+
 
     except Exception as e:
         st.error(f"❌ Error extracting metadata from {pdf_path.name}: {e}")
@@ -60,6 +65,7 @@ def extract_metadata(pdf_path):
 # =========================
 # Table Extraction (pdfplumber)
 # =========================
+
 def is_data_row(row):
     return any(str(cell).replace(",", "").replace("٫", ".").replace("٬", ".").replace(" ", "").isdigit() for cell in row)
 
@@ -116,42 +122,24 @@ def extract_tables(pdf_path):
 # =========================
 # Main Process Function
 # =========================
+
 def process_pdf(pdf_path):
     metadata = extract_metadata(pdf_path)
     table_data = extract_tables(pdf_path)
 
     if not table_data.empty:
-        # Add metadata columns
         for key, value in metadata.items():
             table_data[key] = value
-
-        # Ensure numeric conversion for VAT calculation
-        if "Total before tax" in table_data.columns:
-            table_data["Total before tax"] = (
-                table_data["Total before tax"]
-                .astype(str)
-                .str.replace(",", "")
-                .str.replace("٫", ".")
-                .str.replace("٬", ".")
-            )
-            table_data["Total before tax"] = pd.to_numeric(table_data["Total before tax"], errors="coerce")
-
-            # Calculate VAT (15%) and Total after tax
-            table_data["VAT 15%"] = table_data["Total before tax"] * 0.15
-            table_data["Total after tax"] = table_data["Total before tax"] + table_data["VAT 15%"]
-
         return table_data
     else:
-        df = pd.DataFrame([metadata])
-        df["VAT 15%"] = ""
-        df["Total after tax"] = ""
-        return df
+        return pd.DataFrame([metadata])  # if no table, return metadata only
 
 # =========================
 # Streamlit App UI
 # =========================
+
 st.set_page_config(page_title="Merged Arabic Invoice Extractor", layout="wide")
-st.title("📄 Arabic Invoice Extractor (Fields + Table + VAT)")
+st.title("📄 Arabic Invoice Extractor (Fields + Table)")
 
 uploaded_files = st.file_uploader("Upload PDF files or ZIP", type=["pdf", "zip"], accept_multiple_files=True)
 
@@ -187,7 +175,7 @@ if uploaded_files:
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
                 final_df.to_excel(tmp.name, index=False)
-                st.download_button("📥 Download Excel", tmp.name, file_name="Merged_Invoice_Data_with_VAT.xlsx")
+                st.download_button("📥 Download Excel", tmp.name, file_name="Merged_Invoice_Data.xlsx")
 
         else:
             st.warning("⚠️ No data extracted from the uploaded files.")
