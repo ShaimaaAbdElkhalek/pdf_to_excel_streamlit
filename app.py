@@ -1,103 +1,227 @@
+# streamlit_app.py
+
 import streamlit as st
 import os
 import fitz  # PyMuPDF
 import pdfplumber
 import pandas as pd
 import re
+import tempfile
+import zipfile
 from pathlib import Path
+from io import BytesIO
+import arabic_reshaper
+from bidi.algorithm import get_display
 
-# ========== CLEANING FUNCTIONS ==========
-def clean_total_before_tax(value):
-    """Remove non-numeric characters and specific Arabic words from Total before tax."""
-    if pd.isna(value):
-        return value
-    value = str(value)
-    value = value.replace("المجموع", "")  # remove the Arabic word "المجموع"
-    value = re.sub(r"[^\d.,]", "", value)  # keep only numbers and decimal separators
-    return value.strip()
+# =========================
+# Arabic Helpers
+# =========================
 
-def clean_address_or_name(value):
-    """Remove only the exact words 'اسم العميل' or 'العنوان' (and colons after them), keep the rest."""
-    if pd.isna(value):
-        return value
-    value = str(value)
-    # Remove the words and an optional colon after them
-    value = re.sub(r"(اسم العميل|العنوان)\s*:?", "", value)
-    return value.strip()
+def reshape_arabic_text(text):
+    try:
+        reshaped = arabic_reshaper.reshape(text)
+        bidi_text = get_display(reshaped)
+        return bidi_text
+    except:
+        return text
 
-# ========== PDF EXTRACTION ==========
-def extract_tables_from_pdf(pdf_path):
-    """Extract tables from a PDF using pdfplumber."""
-    tables_list = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                df = pd.DataFrame(table)
-                tables_list.append(df)
-    return tables_list
+# =========================
+# Metadata Extraction (PyMuPDF)
+# =========================
 
-# ========== MAIN PROCESS ==========
-def process_pdfs(source_folder):
-    """Process all PDFs in a folder and return cleaned combined DataFrame."""
-    all_tables = []
+def extract_metadata(pdf_path):
+    try:
+        with fitz.open(pdf_path) as doc:
+            full_text = "\n".join([page.get_text() for page in doc])
 
-    for file in os.listdir(source_folder):
-        if file.lower().endswith(".pdf"):
-            pdf_path = os.path.join(source_folder, file)
-            pdf_tables = extract_tables_from_pdf(pdf_path)
-            for table in pdf_tables:
-                all_tables.append(table)
+        def find_field(text, keyword):
+            pattern = rf"{keyword}[:\s]*([^\n]*)"
+            match = re.search(pattern, text)
+            return match.group(1).strip() if match else ""
 
-    if not all_tables:
+        address_part1 = find_field(full_text, "رقم السجل")
+        address_part2 = find_field(full_text, "العنوان")
+
+        # === Clean customer_name ===
+        raw_customer = find_field(full_text, "فاتورة ضريبية")
+        raw_customer = re.sub(r"اسم العميل.*", "", raw_customer).strip()  # remove 'اسم العميل' and after
+        raw_customer = re.sub(r":.*", "", raw_customer).strip()            # remove ':' and after
+
+        # === Clean address ===
+        full_address = f"{address_part1} {address_part2}".strip()
+        full_address = re.sub(r"العنوان.*", "", full_address).strip()      # remove 'العنوان' and after
+        full_address = re.sub(r":.*", "", full_address).strip()             # remove ':' and after
+
+        metadata = {
+            "invoice_number": find_field(full_text, "رقم الفاتورة"),
+            "invoice_date": find_field(full_text, "تاريخ الفاتورة"),
+            "customer_name": raw_customer,
+            "address_part1": address_part1,
+            "address_part2": address_part2,
+            "address": full_address,
+            "Paid": find_field(full_text, "مدفوع"),
+            "Balance": find_field(full_text, "الرصيد المستحق"),
+            "Source File": pdf_path.name
+        }
+
+        return metadata
+
+    except Exception as e:
+        st.error(f"❌ Error extracting metadata from {pdf_path.name}: {e}")
+        return {}
+
+# =========================
+# Table Extraction (pdfplumber)
+# =========================
+
+def is_data_row(row):
+    return any(str(cell).replace(",", "").replace("٫", ".").replace("٬", ".").replace(" ", "").isdigit() for cell in row)
+
+def fix_shifted_rows(row):
+    if len(row) == 7 and row[3].strip() == "" and row[4].strip() != "":
+        row[3] = row[4]
+        row[4] = row[5]
+        row[5] = row[6]
+        row = row[:6]
+    return row
+
+def extract_tables(pdf_path):
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            all_data = []
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                for table in tables:
+                    if table:
+                        df = pd.DataFrame(table)
+                        df = df.dropna(how="all").reset_index(drop=True)
+                        if df.empty:
+                            continue
+
+                        merged_rows = []
+                        temp_row = []
+
+                        for _, row in df.iterrows():
+                            row_values = row.fillna("").astype(str).tolist()
+                            row_values = [reshape_arabic_text(cell) for cell in row_values]
+                            row_values = fix_shifted_rows(row_values)
+
+                            if is_data_row(row_values):
+                                if temp_row:
+                                    combined = [temp_row[0] + " " + row_values[0]] + row_values[1:]
+                                    merged_rows.append(combined)
+                                    temp_row = []
+                                else:
+                                    merged_rows.append(row_values)
+                            else:
+                                temp_row = row_values
+
+                        if merged_rows:
+                            num_cols = len(merged_rows[0])
+                            headers = ["Total before tax", "الكمية", "Unit price", "Quantity", "Description", "SKU", "إضافي"]
+                            df_cleaned = pd.DataFrame(merged_rows, columns=headers[:num_cols])
+                            all_data.append(df_cleaned)
+            return pd.concat(all_data, ignore_index=True) if all_data else pd.DataFrame()
+
+    except Exception as e:
+        st.error(f"❌ Error extracting table from {pdf_path.name}: {e}")
         return pd.DataFrame()
 
-    # Combine all extracted tables
-    combined_df = pd.concat(all_tables, ignore_index=True)
+# =========================
+# Main Process Function
+# =========================
 
-    # Rename columns if needed
-    combined_df.columns = [str(col).strip() for col in combined_df.columns]
+def process_pdf(pdf_path):
+    metadata = extract_metadata(pdf_path)
+    table_data = extract_tables(pdf_path)
 
-    # Apply cleaning functions
-    if "Total before tax" in combined_df.columns:
-        combined_df["Total before tax"] = combined_df["Total before tax"].apply(clean_total_before_tax)
+    if not table_data.empty:
+        for key, value in metadata.items():
+            table_data[key] = value
+        return table_data
+    else:
+        return pd.DataFrame([metadata])  # if no table, return metadata only
 
-    if "Address" in combined_df.columns:
-        combined_df["Address"] = combined_df["Address"].apply(clean_address_or_name)
+# =========================
+# Streamlit App UI
+# =========================
 
-    if "Customer Name" in combined_df.columns:
-        combined_df["Customer Name"] = combined_df["Customer Name"].apply(clean_address_or_name)
+st.set_page_config(page_title="Merged Arabic Invoice Extractor", layout="wide")
+st.title("📄 Arabic Invoice Extractor (Fields + Table)")
 
-    return combined_df
-
-# ========== STREAMLIT UI ==========
-st.title("📄 PDF Table Extractor & Cleaner")
-
-uploaded_files = st.file_uploader("Upload PDF files", type=["pdf"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload PDF files or ZIP", type=["pdf", "zip"], accept_multiple_files=True)
 
 if uploaded_files:
-    temp_folder = "temp_pdfs"
-    os.makedirs(temp_folder, exist_ok=True)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir = Path(temp_dir)
+        pdf_paths = []
 
-    for uploaded_file in uploaded_files:
-        with open(os.path.join(temp_folder, uploaded_file.name), "wb") as f:
-            f.write(uploaded_file.getbuffer())
+        for uploaded_file in uploaded_files:
+            file_path = temp_dir / uploaded_file.name
+            with open(file_path, "wb") as f:
+                f.write(uploaded_file.read())
 
-    df_cleaned = process_pdfs(temp_folder)
+            if uploaded_file.name.endswith(".zip"):
+                with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                    zip_ref.extractall(temp_dir)
+                for pdf in temp_dir.glob("*.pdf"):
+                    pdf_paths.append(pdf)
+            else:
+                pdf_paths.append(file_path)
 
-    if not df_cleaned.empty:
-        st.subheader("Cleaned Data")
-        st.dataframe(df_cleaned)
+        all_data = []
+        for pdf_path in pdf_paths:
+            st.write(f"📄 Processing: {pdf_path.name}")
+            df = process_pdf(pdf_path)
+            if not df.empty:
+                all_data.append(df)
 
-        # Download link
-        output_path = "Cleaned_Combined_Tables.xlsx"
-        df_cleaned.to_excel(output_path, index=False)
-        with open(output_path, "rb") as f:
+        if all_data:
+            final_df = pd.concat(all_data, ignore_index=True)
+
+            # ======== Cleaning Steps ========
+
+            # 1. Clean "Total before tax"
+            if "Total before tax" in final_df.columns:
+                final_df["Total before tax"] = (
+                    final_df["Total before tax"].astype(str)
+                    .str.replace(r"[^\d.,]", "", regex=True)
+                    .str.replace(",", "", regex=False)
+                    .replace("", None)
+                    .astype(float)
+                )
+
+                # 2. Calculate VAT 15%
+                final_df["VAT 15%"] = (final_df["Total before tax"] * 0.15).round(2)
+
+                # 3. Calculate Total after tax
+                final_df["Total after tax"] = (final_df["Total before tax"] + final_df["VAT 15%"]).round(2)
+
+            # 4. Convert Paid and Balance to float
+            for col in ["Paid", "Balance"]:
+                if col in final_df.columns:
+                    final_df[col] = (
+                        final_df[col].astype(str)
+                        .str.replace(r"[^\d.,]", "", regex=True)
+                        .str.replace(",", "", regex=False)
+                        .replace("", None)
+                        .astype(float)
+                    )
+
+            st.success("✅ Extraction & cleaning complete!")
+            st.dataframe(final_df)
+
+            # ======== FIX: Proper Excel Download ========
+            output = BytesIO()
+            final_df.to_excel(output, index=False, engine="openpyxl")
+            output.seek(0)
+
             st.download_button(
-                label="Download Cleaned Excel",
-                data=f,
-                file_name=output_path,
+                label="📥 Download Excel",
+                data=output,
+                file_name="Merged_Invoice_Data.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-    else:
-        st.warning("No tables found in uploaded PDFs.")
+
+        else:
+            st.warning("⚠️ No data extracted from the uploaded files.")
