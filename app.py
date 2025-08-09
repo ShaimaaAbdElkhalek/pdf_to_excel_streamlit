@@ -143,9 +143,9 @@ def process_pdf(pdf_path):
 # =========================
 
 st.set_page_config(page_title="Merged Arabic Invoice Extractor", layout="wide")
-st.title("📄 Arabic Invoice Extractor (Fields + Table)")
+st.title("📄 Arabic Invoice Extractor")
 
-uploaded_files = st.file_uploader("Upload PDF files or ZIP", type=["pdf", "zip"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload PDF files", type=["pdf", "zip"], accept_multiple_files=True)
 
 if uploaded_files:
     with tempfile.TemporaryDirectory() as temp_dir:
