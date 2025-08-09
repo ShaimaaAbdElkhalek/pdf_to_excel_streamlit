@@ -45,7 +45,7 @@ def extract_metadata(pdf_path):
         metadata = {
             "invoice_number": find_field(full_text, "رقم الفاتورة"),
             "invoice_date": find_field(full_text, "تاريخ الفاتورة"),
-            "customer_name": find_field(full_text, "فاتورة ضريبية"),  # no cleaning applied here
+            "customer_name": find_field(full_text, "فاتورة ضريبية"),  # No cleaning applied here
             "address_part1": address_part1,
             "address_part2": address_part2,
             "address": f"{address_part1} {address_part2}".strip(),
@@ -173,17 +173,19 @@ if uploaded_files:
             # 1. Remove "المجموع" from Total before tax
             if "Total before tax" in final_df.columns:
                 final_df["Total before tax"] = (
-                    final_df["Total before tax"].astype(str)
+                    final_df["Total before tax"]
+                    .astype(str)
                     .str.replace("المجموع", "", regex=False)
                     .str.strip()
                 )
 
-            # 2. Customer Name cleaning is removed (no changes applied)
+            # 2. No cleaning applied to "Customer Name" — it's taken as-is
 
             # 3. Clean Address column
             if "address" in final_df.columns:
                 final_df["address"] = (
-                    final_df["address"].astype(str)
+                    final_df["address"]
+                    .astype(str)
                     .str.replace(r"العنوان\s*[:：]?\s*", "", regex=True)
                     .str.strip(" :：﹕")
                 )
@@ -192,7 +194,8 @@ if uploaded_files:
             for col in ["Paid", "Balance"]:
                 if col in final_df.columns:
                     final_df[col] = (
-                        final_df[col].astype(str)
+                        final_df[col]
+                        .astype(str)
                         .str.replace(r"[^\d.,]", "", regex=True)
                         .str.replace(",", "", regex=False)
                         .astype(float)
