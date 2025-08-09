@@ -44,8 +44,8 @@ def extract_metadata(pdf_path):
 
         # === Clean customer_name ===
         raw_customer = find_field(full_text, "فاتورة ضريبية")
-        raw_customer = re.sub(r"اسم العميل.*", "", raw_customer).strip()  # remove 'اسم العميل' and after
-        raw_customer = re.sub(r":.*", "", raw_customer).strip()            # remove ':' and after
+        raw_customer = re.sub(r"اسم العميل.*", "", raw_customer).strip()
+        raw_customer = re.sub(r":.*", "", raw_customer).strip()
 
         # === Clean address ===
         full_address = f"{address_part1} {address_part2}".strip()
@@ -136,7 +136,7 @@ def process_pdf(pdf_path):
             table_data[key] = value
         return table_data
     else:
-        return pd.DataFrame([metadata])  # if no table, return metadata only
+        return pd.DataFrame([metadata])
 
 # =========================
 # Streamlit App UI
@@ -176,8 +176,6 @@ if uploaded_files:
             final_df = pd.concat(all_data, ignore_index=True)
 
             # ======== Cleaning Steps ========
-
-            # 1. Clean "Total before tax"
             if "Total before tax" in final_df.columns:
                 final_df["Total before tax"] = (
                     final_df["Total before tax"].astype(str)
@@ -186,14 +184,9 @@ if uploaded_files:
                     .replace("", None)
                     .astype(float)
                 )
-
-                # 2. Calculate VAT 15%
                 final_df["VAT 15%"] = (final_df["Total before tax"] * 0.15).round(2)
-
-                # 3. Calculate Total after tax
                 final_df["Total after tax"] = (final_df["Total before tax"] + final_df["VAT 15%"]).round(2)
 
-            # 4. Convert Paid and Balance to float
             for col in ["Paid", "Balance"]:
                 if col in final_df.columns:
                     final_df[col] = (
@@ -204,10 +197,27 @@ if uploaded_files:
                         .astype(float)
                     )
 
+            # ======== Keep only required columns in order ========
+            required_columns = [
+                "Invoice Number", "Invoice Date", "Customer Name", "Address", "Paid", "Balance", "Phone_number",
+                "Total before tax", "VAT 15% Calc", "Total after tax",
+                "Unit price", "Quantity", "Description", "SKU",
+                "Source File"
+            ]
+
+            final_df = final_df.rename(columns={
+                "invoice_number": "Invoice Number",
+                "invoice_date": "Invoice Date",
+                "customer_name": "Customer Name",
+                "address": "Address",
+                "VAT 15%": "VAT 15% Calc"
+            })
+
+            final_df = final_df.reindex(columns=required_columns)
+
             st.success("✅ Extraction & cleaning complete!")
             st.dataframe(final_df)
 
-            # ======== FIX: Proper Excel Download ========
             output = BytesIO()
             final_df.to_excel(output, index=False, engine="openpyxl")
             output.seek(0)
