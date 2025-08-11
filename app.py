@@ -18,7 +18,6 @@ from bidi.algorithm import get_display
 # =========================
 
 def reshape_arabic_text(text):
-    """Reshape Arabic text for correct display, ignore errors."""
     try:
         reshaped = arabic_reshaper.reshape(text)
         bidi_text = get_display(reshaped)
@@ -43,10 +42,12 @@ def extract_metadata(pdf_path):
         address_part1 = find_field(full_text, "رقم السجل")
         address_part2 = find_field(full_text, "العنوان")
 
+        # === Clean customer_name ===
         raw_customer = find_field(full_text, "فاتورة ضريبية")
         raw_customer = re.sub(r"اسم العميل.*", "", raw_customer).strip()
         raw_customer = re.sub(r":.*", "", raw_customer).strip()
 
+        # === Clean address ===
         full_address = f"{address_part1} {address_part2}".strip()
 
         metadata = {
@@ -98,13 +99,7 @@ def extract_tables(pdf_path):
 
                         for _, row in df.iterrows():
                             row_values = row.fillna("").astype(str).tolist()
-
-                            # Reshape Arabic for all except SKU column (last col index = -1)
-                            row_values = [
-                                reshape_arabic_text(cell) if i != len(row_values)-1 else cell
-                                for i, cell in enumerate(row_values)
-                            ]
-
+                            row_values = [reshape_arabic_text(cell) for cell in row_values]
                             row_values = fix_shifted_rows(row_values)
 
                             if is_data_row(row_values):
@@ -202,12 +197,16 @@ if uploaded_files:
                         .astype(float)
                     )
 
+            # ======== Keep only required columns in order ========
             required_columns = [
-                "Invoice Number", "Invoice Date", "Customer Name", "Balance", "Address", "Paid", 
+                "Invoice Number", "Invoice Date", "Customer Name","Balance",  "Address", "Paid", 
                 "Total before tax", "VAT 15%", "Total after tax",
                 "Unit price", "Quantity", "Description", "SKU",
                 "Source File"
             ]
+
+
+
             final_df = final_df.reindex(columns=required_columns)
 
             st.success("✅ Extraction & cleaning complete!")
