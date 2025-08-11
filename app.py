@@ -213,15 +213,12 @@ if uploaded_files:
             st.dataframe(final_df)
 
             output = BytesIO()
-            final_df.to_excel(output, index=False, engine="openpyxl")
+            final_df.to_csv(output, index=False, encoding="utf-8-sig")  # utf-8-sig for Arabic compatibility
             output.seek(0)
-
+            
             st.download_button(
-                label="📥 Download Excel",
+                label="📥 Download CSV",
                 data=output,
-                file_name="Merged_Invoice_Data.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                file_name="Merged_Invoice_Data.csv",
+                mime="text/csv"
             )
-
-        else:
-            st.warning("⚠️ No data extracted from the uploaded files.")
