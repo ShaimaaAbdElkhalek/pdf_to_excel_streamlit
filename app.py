@@ -197,15 +197,21 @@ if uploaded_files:
                         .astype(float)
                     )
 
+            # ======== Fix Invoice Date to MM/DD/YYYY ========
+            if "Invoice Date" in final_df.columns:
+                final_df["Invoice Date"] = pd.to_datetime(
+                    final_df["Invoice Date"],
+                    errors="coerce",
+                    dayfirst=True
+                ).dt.strftime("%m/%d/%Y")
+
             # ======== Keep only required columns in order ========
             required_columns = [
-                "Invoice Number", "Invoice Date", "Customer Name","Balance",  "Address", "Paid", 
+                "Invoice Number", "Invoice Date", "Customer Name", "Balance", "Address", "Paid",
                 "Total before tax", "VAT 15%", "Total after tax",
                 "Unit price", "Quantity", "Description", "SKU",
                 "Source File"
             ]
-
-
 
             final_df = final_df.reindex(columns=required_columns)
 
