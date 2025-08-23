@@ -85,38 +85,68 @@ def extract_tables(pdf_path):
     try:
         with pdfplumber.open(pdf_path) as pdf:
             all_data = []
+
             for page in pdf.pages:
                 tables = page.extract_tables()
-                for table in tables:
-                    if table:
-                        df = pd.DataFrame(table)
-                        df = df.dropna(how="all").reset_index(drop=True)
-                        if df.empty:
-                            continue
+                page_data = []
 
-                        merged_rows = []
-                        temp_row = []
+                if tables:
+                    for table in tables:
+                        if table:
+                            df = pd.DataFrame(table)
+                            df = df.dropna(how="all").reset_index(drop=True)
+                            if df.empty:
+                                continue
 
-                        for _, row in df.iterrows():
-                            row_values = row.fillna("").astype(str).tolist()
-                            row_values = [reshape_arabic_text(cell) for cell in row_values]
-                            row_values = fix_shifted_rows(row_values)
+                            merged_rows = []
+                            temp_row = []
 
-                            if is_data_row(row_values):
-                                if temp_row:
-                                    combined = [temp_row[0] + " " + row_values[0]] + row_values[1:]
-                                    merged_rows.append(combined)
-                                    temp_row = []
+                            for _, row in df.iterrows():
+                                row_values = row.fillna("").astype(str).tolist()
+                                row_values = [reshape_arabic_text(cell) for cell in row_values]
+                                row_values = fix_shifted_rows(row_values)
+
+                                if is_data_row(row_values):
+                                    if temp_row:
+                                        combined = [temp_row[0] + " " + row_values[0]] + row_values[1:]
+                                        merged_rows.append(combined)
+                                        temp_row = []
+                                    else:
+                                        merged_rows.append(row_values)
                                 else:
-                                    merged_rows.append(row_values)
-                            else:
-                                temp_row = row_values
+                                    temp_row = row_values
 
-                        if merged_rows:
-                            num_cols = len(merged_rows[0])
-                            headers = ["Total before tax", "الكمية", "Unit price", "Quantity", "Description", "SKU", "إضافي"]
-                            df_cleaned = pd.DataFrame(merged_rows, columns=headers[:num_cols])
-                            all_data.append(df_cleaned)
+                            if merged_rows:
+                                num_cols = len(merged_rows[0])
+                                headers = ["Total before tax", "الكمية", "Unit price", "Quantity", "Description", "SKU", "إضافي"]
+                                df_cleaned = pd.DataFrame(merged_rows, columns=headers[:num_cols])
+                                page_data.append(df_cleaned)
+
+                # === Fallback: if no tables detected, try word-based extraction ===
+                if not page_data:
+                    words = page.extract_words(use_text_flow=True)
+                    if words:
+                        # Group by line (y0 coordinate)
+                        rows = {}
+                        for w in words:
+                            y = round(w["top"], -1)  # group nearby text
+                            rows.setdefault(y, []).append((w["x0"], w["text"]))
+                        structured_rows = []
+                        for y, items in sorted(rows.items()):
+                            items = sorted(items, key=lambda x: x[0])  # sort by x
+                            structured_rows.append([txt for _, txt in items])
+
+                        # Try to keep only rows that look like table rows
+                        structured_rows = [r for r in structured_rows if len(r) >= 3]
+
+                        if structured_rows:
+                            headers = ["Description", "Quantity", "Unit price", "Total before tax"]
+                            df_cleaned = pd.DataFrame(structured_rows, columns=headers[:len(structured_rows[0])])
+                            page_data.append(df_cleaned)
+
+                if page_data:
+                    all_data.extend(page_data)
+
             return pd.concat(all_data, ignore_index=True) if all_data else pd.DataFrame()
 
     except Exception as e:
