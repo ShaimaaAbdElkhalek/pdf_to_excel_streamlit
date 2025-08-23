@@ -13,251 +13,143 @@ from io import BytesIO
 import arabic_reshaper
 from bidi.algorithm import get_display
 
-# =========================
-# Arabic Helpers
-# =========================
+# ========== Functions ==========
 
-def reshape_arabic_text(text):
-    try:
-        reshaped = arabic_reshaper.reshape(text)
-        bidi_text = get_display(reshaped)
-        return bidi_text
-    except:
-        return text
+def reshape_arabic(text):
+    """Reshape Arabic text for proper display in Excel/Streamlit."""
+    if not text:
+        return ""
+    return get_display(arabic_reshaper.reshape(text))
 
-# =========================
-# Metadata Extraction (PyMuPDF)
-# =========================
+def extract_metadata_fields(pdf_path):
+    """Extract Arabic metadata fields using PyMuPDF (fitz)."""
+    fields = {
+        "رقم الفاتورة": "",
+        "تاريخ الفاتورة": "",
+        "اسم العميل": "",
+        "العنوان": "",
+    }
 
-def extract_metadata(pdf_path):
-    try:
-        with fitz.open(pdf_path) as doc:
-            full_text = "\n".join([page.get_text() for page in doc])
+    patterns = {
+        "رقم الفاتورة": r"رقم الفاتورة[:\- ]+(\d+)",
+        "تاريخ الفاتورة": r"تاريخ الفاتورة[:\- ]+([\d\/\-]+)",
+        "اسم العميل": r"اسم العميل[:\- ]+([\u0600-\u06FF\s]+)",
+        "العنوان": r"العنوان[:\- ]+([\u0600-\u06FF\s\d\-]+)",
+    }
 
-        def find_field(text, keyword):
-            pattern = rf"{keyword}[:\s]*([^\n]*)"
-            match = re.search(pattern, text)
-            return match.group(1).strip() if match else ""
+    doc = fitz.open(pdf_path)
+    text = ""
+    for page in doc:
+        text += page.get_text("text")
 
-        address_part1 = find_field(full_text, "رقم السجل")
-        address_part2 = find_field(full_text, "العنوان")
+    for field, pattern in patterns.items():
+        match = re.search(pattern, text)
+        if match:
+            fields[field] = reshape_arabic(match.group(1).strip())
 
-        # === Clean customer_name ===
-        raw_customer = find_field(full_text, "فاتورة ضريبية")
-        raw_customer = re.sub(r"اسم العميل.*", "", raw_customer).strip()
-        raw_customer = re.sub(r":.*", "", raw_customer).strip()
+    return fields
 
-        # === Clean address ===
-        full_address = f"{address_part1} {address_part2}".strip()
-
-        metadata = {
-            "Invoice Number": find_field(full_text, "رقم الفاتورة"),
-            "Invoice Date": find_field(full_text, "تاريخ الفاتورة"),
-            "Customer Name": raw_customer,
-            "Address": full_address,
-            "Paid": find_field(full_text, "مدفوع"),
-            "Balance": find_field(full_text, "الرصيد المستحق"),
-            "Source File": pdf_path.name
-        }
-
-        return metadata
-
-    except Exception as e:
-        st.error(f"❌ Error extracting metadata from {pdf_path.name}: {e}")
-        return {}
-
-# =========================
-# Table Extraction (pdfplumber)
-# =========================
-
-def is_data_row(row):
-    return any(str(cell).replace(",", "").replace("٫", ".").replace("٬", ".").replace(" ", "").isdigit() for cell in row)
-
-def fix_shifted_rows(row):
-    if len(row) == 7 and row[3].strip() == "" and row[4].strip() != "":
-        row[3] = row[4]
-        row[4] = row[5]
-        row[5] = row[6]
-        row = row[:6]
-    return row
 
 def extract_tables(pdf_path):
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            all_data = []
+    """Extract tables using pdfplumber (no fixed column count)."""
+    tables_data = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            tables = page.extract_tables()
+            for table in tables:
+                if table:
+                    # Create DataFrame directly from table
+                    df = pd.DataFrame(table)
 
-            for page in pdf.pages:
-                tables = page.extract_tables()
-                page_data = []
+                    # First row is usually header
+                    df.columns = df.iloc[0]
+                    df = df.drop(0).reset_index(drop=True)
 
-                if tables:
-                    for table in tables:
-                        if table:
-                            df = pd.DataFrame(table)
-                            df = df.dropna(how="all").reset_index(drop=True)
-                            if df.empty:
-                                continue
+                    # Reshape Arabic text in all cells
+                    df = df.applymap(lambda x: reshape_arabic(str(x)) if x else "")
 
-                            merged_rows = []
-                            temp_row = []
+                    tables_data.append(df)
 
-                            for _, row in df.iterrows():
-                                row_values = row.fillna("").astype(str).tolist()
-                                row_values = [reshape_arabic_text(cell) for cell in row_values]
-                                row_values = fix_shifted_rows(row_values)
+    return tables_data
 
-                                if is_data_row(row_values):
-                                    if temp_row:
-                                        combined = [temp_row[0] + " " + row_values[0]] + row_values[1:]
-                                        merged_rows.append(combined)
-                                        temp_row = []
-                                    else:
-                                        merged_rows.append(row_values)
-                                else:
-                                    temp_row = row_values
-
-                            if merged_rows:
-                                num_cols = len(merged_rows[0])
-                                headers = ["Total before tax", "الكمية", "Unit price", "Quantity", "Description", "SKU", "إضافي"]
-                                df_cleaned = pd.DataFrame(merged_rows, columns=headers[:num_cols])
-                                page_data.append(df_cleaned)
-
-                # === Fallback: if no tables detected, try word-based extraction ===
-                if not page_data:
-                    words = page.extract_words(use_text_flow=True)
-                    if words:
-                        # Group by line (y0 coordinate)
-                        rows = {}
-                        for w in words:
-                            y = round(w["top"], -1)  # group nearby text
-                            rows.setdefault(y, []).append((w["x0"], w["text"]))
-                        structured_rows = []
-                        for y, items in sorted(rows.items()):
-                            items = sorted(items, key=lambda x: x[0])  # sort by x
-                            structured_rows.append([txt for _, txt in items])
-
-                        # Try to keep only rows that look like table rows
-                        structured_rows = [r for r in structured_rows if len(r) >= 3]
-
-                        if structured_rows:
-                            headers = ["Description", "Quantity", "Unit price", "Total before tax"]
-                            df_cleaned = pd.DataFrame(structured_rows, columns=headers[:len(structured_rows[0])])
-                            page_data.append(df_cleaned)
-
-                if page_data:
-                    all_data.extend(page_data)
-
-            return pd.concat(all_data, ignore_index=True) if all_data else pd.DataFrame()
-
-    except Exception as e:
-        st.error(f"❌ Error extracting table from {pdf_path.name}: {e}")
-        return pd.DataFrame()
-
-# =========================
-# Main Process Function
-# =========================
 
 def process_pdf(pdf_path):
-    metadata = extract_metadata(pdf_path)
-    table_data = extract_tables(pdf_path)
+    """Combine field + table extraction for one PDF."""
+    metadata = extract_metadata_fields(pdf_path)
+    tables = extract_tables(pdf_path)
 
-    if not table_data.empty:
+    if tables:
+        final_table = tables[0].copy()
+        # Attach metadata to each row
         for key, value in metadata.items():
-            table_data[key] = value
-        return table_data
+            final_table[key] = value
+        return final_table
     else:
         return pd.DataFrame([metadata])
 
-# =========================
-# Streamlit App UI
-# =========================
 
-st.set_page_config(page_title="Merged Arabic Invoice Extractor", layout="wide")
-st.title("📄 Invoice Extractor Pdf to Excel")
+def process_files(uploaded_files):
+    """Process uploaded PDFs or ZIPs and return merged DataFrame."""
+    all_data = []
 
-uploaded_files = st.file_uploader("Upload PDF files", type=["pdf", "zip"], accept_multiple_files=True)
+    for uploaded_file in uploaded_files:
+        # If ZIP -> extract and process PDFs inside
+        if uploaded_file.name.endswith(".zip"):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                zip_path = os.path.join(tmpdir, uploaded_file.name)
+                with open(zip_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+
+                with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                    zip_ref.extractall(tmpdir)
+
+                for file in Path(tmpdir).rglob("*.pdf"):
+                    try:
+                        df = process_pdf(str(file))
+                        all_data.append(df)
+                    except Exception as e:
+                        st.error(f"❌ Error extracting from {file.name}: {e}")
+
+        else:  # Single PDF
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmpfile:
+                tmpfile.write(uploaded_file.getbuffer())
+                tmp_path = tmpfile.name
+
+            try:
+                df = process_pdf(tmp_path)
+                all_data.append(df)
+            except Exception as e:
+                st.error(f"❌ Error extracting from {uploaded_file.name}: {e}")
+
+    if all_data:
+        return pd.concat(all_data, ignore_index=True)
+    return pd.DataFrame()
+
+
+# ========== Streamlit UI ==========
+
+st.title("📑 Arabic Invoice Extractor")
+st.write("Upload Arabic PDF invoices (or a ZIP of PDFs). The app will extract fields + tables.")
+
+uploaded_files = st.file_uploader("Upload PDF or ZIP", type=["pdf", "zip"], accept_multiple_files=True)
 
 if uploaded_files:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_dir = Path(temp_dir)
-        pdf_paths = []
+    df = process_files(uploaded_files)
 
-        for uploaded_file in uploaded_files:
-            file_path = temp_dir / uploaded_file.name
-            with open(file_path, "wb") as f:
-                f.write(uploaded_file.read())
+    if not df.empty:
+        st.success("✅ Extraction complete!")
+        st.dataframe(df)
 
-            if uploaded_file.name.endswith(".zip"):
-                with zipfile.ZipFile(file_path, 'r') as zip_ref:
-                    zip_ref.extractall(temp_dir)
-                for pdf in temp_dir.glob("*.pdf"):
-                    pdf_paths.append(pdf)
-            else:
-                pdf_paths.append(file_path)
+        # Export to Excel
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            df.to_excel(writer, index=False, sheet_name="Invoices")
 
-        all_data = []
-        for pdf_path in pdf_paths:
-            st.write(f"📄 Processing: {pdf_path.name}")
-            df = process_pdf(pdf_path)
-            if not df.empty:
-                all_data.append(df)
-
-        if all_data:
-            final_df = pd.concat(all_data, ignore_index=True)
-
-            # ======== Cleaning Steps ========
-            if "Total before tax" in final_df.columns:
-                final_df["Total before tax"] = (
-                    final_df["Total before tax"].astype(str)
-                    .str.replace(r"[^\d.,]", "", regex=True)
-                    .str.replace(",", "", regex=False)
-                    .replace("", None)
-                    .astype(float)
-                )
-                final_df["VAT 15%"] = (final_df["Total before tax"] * 0.15).round(2)
-                final_df["Total after tax"] = (final_df["Total before tax"] + final_df["VAT 15%"]).round(2)
-
-            for col in ["Paid", "Balance"]:
-                if col in final_df.columns:
-                    final_df[col] = (
-                        final_df[col].astype(str)
-                        .str.replace(r"[^\d.,]", "", regex=True)
-                        .str.replace(",", "", regex=False)
-                        .replace("", None)
-                        .astype(float)
-                    )
-
-            # ======== Fix Invoice Date to MM/DD/YYYY ========
-            if "Invoice Date" in final_df.columns:
-                final_df["Invoice Date"] = pd.to_datetime(
-                    final_df["Invoice Date"],
-                    errors="coerce",
-                    dayfirst=True
-                ).dt.strftime("%m/%d/%Y")
-
-            # ======== Keep only required columns in order ========
-            required_columns = [
-                "Invoice Number", "Invoice Date", "Customer Name", "Balance","Paid", "Address", 
-                "Total before tax", "VAT 15%", "Total after tax",
-                "Unit price", "Quantity", "Description", "SKU",
-                "Source File"
-            ]
-
-            final_df = final_df.reindex(columns=required_columns)
-
-            st.success("✅ Extraction & cleaning complete!")
-            st.dataframe(final_df)
-
-            output = BytesIO()
-            final_df.to_excel(output, index=False, engine="openpyxl")
-            output.seek(0)
-
-            st.download_button(
-                label="📥 Download Excel",
-                data=output,
-                file_name="Merged_Invoice_Data.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-
-        else:
-            st.warning("⚠️ No data extracted from the uploaded files.")
+        st.download_button(
+            label="📥 Download Excel",
+            data=output.getvalue(),
+            file_name="extracted_invoices.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.warning("⚠️ No data extracted.")
