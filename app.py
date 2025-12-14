@@ -1,9 +1,11 @@
 # streamlit_app.py
-# Full corrected code:
-# - Works with BOTH: "رقم الفاتورة" OR "الفاتورة رقم"
-# - Works with BOTH: "اسم العميل: X" OR "X : اسم العميل"
-# - Normalizes Arabic presentation forms (new PDFs) using NFKC
-# - Keeps your table logic (merge/reshape) as-is
+# Corrected to extract Customer Name for BOTH old + new PDFs:
+# - Old: "مؤسسة طعام المحترف: اسم العميل"
+# - New: "مؤسسة الركن الخليجي : العميل اسم" + sometimes next line "الغذائية"
+# Also:
+# - Invoice Number: "رقم الفاتورة" OR "الفاتورة رقم"
+# - Normalizes Arabic presentation forms using NFKC
+# - Keeps your table logic as-is
 
 import streamlit as st
 import fitz  # PyMuPDF
@@ -30,15 +32,31 @@ def reshape_arabic_text(text):
         return str(text)
 
 def normalize_text(text: str) -> str:
-    """
-    Important for NEW PDFs:
-    Converts Arabic presentation forms مثل: ﻓﺎﺗﻮرة / اﻟﻔﺎﺗﻮرة -> فاتورة / الفاتورة
-    """
     if text is None:
         return ""
-    text = str(text)
-    text = unicodedata.normalize("NFKC", text)
-    return text
+    return unicodedata.normalize("NFKC", str(text))
+
+def clean_money_str(x: str) -> str:
+    x = normalize_text(x)
+    x = re.sub(r"[^\d.,]", "", x)
+    x = x.replace(",", "")
+    return x.strip()
+
+def first_amount_near(text: str, keywords, window=80) -> str:
+    text = normalize_text(text)
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    keywords = [normalize_text(k) for k in keywords]
+
+    for kw in keywords:
+        for m in re.finditer(re.escape(kw), text):
+            start = max(0, m.start() - window)
+            end = min(len(text), m.end() + window)
+            chunk = text[start:end]
+            num = re.search(r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)", chunk)
+            if num:
+                return num.group(1)
+    return ""
 
 # =========================
 # Metadata Extraction (PyMuPDF)
@@ -48,19 +66,20 @@ def extract_metadata(pdf_path):
         with fitz.open(pdf_path) as doc:
             full_text = "\n".join([page.get_text("text") for page in doc])
 
-        # ✅ normalize old + new PDFs
         full_text = normalize_text(full_text)
 
         def find_field(text, keywords):
             """
-            keywords: string OR list[str]
-            Supports BOTH formats:
+            Supports BOTH:
               1) key : value
               2) value : key
-            Returns first match.
+            Returns first matched 'value string' (not numeric-cleaned).
             """
+            text = normalize_text(text)
+
             if isinstance(keywords, str):
                 keywords = [keywords]
+            keywords = [normalize_text(k) for k in keywords]
 
             for keyword in keywords:
                 # 1) key : value
@@ -77,42 +96,79 @@ def extract_metadata(pdf_path):
 
             return ""
 
+        # ---------- Address ----------
         address_part1 = find_field(full_text, ["رقم السجل", "السجل رقم"])
         address_part2 = find_field(full_text, ["العنوان"])
-
-      
-
-          # === Clean customer_name ===
-        customer_namer = find_field(full_text,["فاتورة ضريبية", "ﺿﺮﻳﺒﯿﺔ ﻓﺎﺗﻮرة","ﺿﺮﻳﺒﯿﺔ ﻓﺎﺗﻮرة","اﻟﺠﻮال رﻗﻢ"])
-        customer_name = re.sub(r"العميل اسم.*", "", customer_namer).strip()
-        customer_name = re.sub(r":.*", "", customer_namer).strip()
-
-
-        
-
         full_address = f"{address_part1} {address_part2}".strip()
 
-        paid = find_field(full_text, ["مدفوع"])
+        # ---------- Customer Name (FIXED) ----------
+        # We try to capture customer name from BOTH directions and BOTH labels:
+        # "اسم العميل" / "العميل اسم"
+        # Also handle the case where "الغذائية" comes in the next line.
+        customer_name = ""
 
-        balance =  find_field(
-            full_text,
-            ["الرصيد المستحق", "المستحق الرصيد", "الرصيد"]
-        )
+        # Try patterns on the WHOLE text (more reliable than depending on find_field only)
+        patterns = [
+            r"(?:اسم العميل|العميل اسم)\s*[:：]\s*([^\n]+)",          # key : value
+            r"([^\n:：]+?)\s*[:：]\s*(?:اسم العميل|العميل اسم)",      # value : key
+        ]
+        for p in patterns:
+            m = re.search(p, full_text)
+            if m:
+                customer_name = m.group(1).strip()
+                break
 
+        # If still empty, fallback to find_field (sometimes it is enough)
+        if not customer_name:
+            customer_line = find_field(full_text, ["اسم العميل", "العميل اسم"])
+            customer_line = normalize_text(customer_line)
 
-        
-       #### balance=find_field( full_text, ["الرصيد المستحق", "المستحق الرصيد"])
+            m1 = re.search(r"(?:اسم العميل|العميل اسم)\s*[:：]\s*(.+)", customer_line)
+            if m1:
+                customer_name = m1.group(1).strip()
+            else:
+                m2 = re.search(r"(.+?)\s*[:：]\s*(?:اسم العميل|العميل اسم)", customer_line)
+                customer_name = m2.group(1).strip() if m2 else customer_line.strip()
+
+        # Append next line if the PDF splits like:
+        # "مؤسسة الركن الخليجي : العميل اسم"
+        # "الغذائية"
+        if customer_name:
+            # find where this customer chunk appears, then look at the next line
+            idx = full_text.find(customer_name)
+            if idx != -1:
+                tail = full_text[idx: idx + 200]
+                lines = [l.strip() for l in tail.splitlines() if l.strip()]
+                if lines:
+                    # if first line is customer_name and second line is a short continuation, append it
+                    if len(lines) >= 2 and lines[0] == customer_name:
+                        cont = lines[1]
+                        # avoid appending if continuation looks like tax/registry/address
+                        if not re.search(r"(الرقم الضريبي|رقم السجل|العنوان|\d{6,})", cont):
+                            # often continuation is "الغذائية"
+                            if len(cont) <= 40:
+                                customer_name = f"{customer_name} {cont}".strip()
+
+        # final cleanup
+        customer_name = re.split(r"الرقم الضريبي|رقم السجل|العنوان", customer_name)[0].strip()
+
+        # ---------- Invoice Number/Date ----------
+        invoice_number = find_field(full_text, ["رقم الفاتورة", "الفاتورة رقم"])
+        invoice_date = find_field(full_text, ["تاريخ الفاتورة", "الفاتورة تاريخ"])
+
+        # ---------- Paid/Balance (more reliable numeric extraction) ----------
+        paid = first_amount_near(full_text, ["مدفوع"])
+        balance = first_amount_near(full_text, ["الرصيد المستحق", "المستحق الرصيد", "الرصيد"])
+
         metadata = {
-            # ✅ Invoice number supports: "رقم الفاتورة" OR "الفاتورة رقم"
-            "Invoice Number": find_field(full_text, ["رقم الفاتورة", "الفاتورة رقم"]),
-            "Invoice Date": find_field(full_text, ["تاريخ الفاتورة", "الفاتورة تاريخ"]),
+            "Invoice Number": invoice_number,
+            "Invoice Date": invoice_date,
             "Customer Name": customer_name,
             "Address": full_address,
             "Paid": paid,
             "Balance": balance,
             "Source File": pdf_path.name
         }
-
         return metadata
 
     except Exception as e:
