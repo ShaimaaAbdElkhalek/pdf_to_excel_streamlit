@@ -51,7 +51,7 @@ def extract_metadata(pdf_path):
         full_address = f"{address_part1} {address_part2}".strip()
 
         metadata = {
-            "Invoice Number": find_field(full_text,xt, ["رقم الفاتورة", "الفاتورة رقم"]),
+            "Invoice Number": find_field(full_text, "رقم الفاتورة"),
             "Invoice Date": find_field(full_text, "تاريخ الفاتورة"),
             "Customer Name": raw_customer,
             "Address": full_address,
