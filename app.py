@@ -1,4 +1,9 @@
 # streamlit_app.py
+# Full corrected code:
+# - Works with BOTH: "رقم الفاتورة" OR "الفاتورة رقم"
+# - Works with BOTH: "اسم العميل: X" OR "X : اسم العميل"
+# - Normalizes Arabic presentation forms (new PDFs) using NFKC
+# - Keeps your table logic (merge/reshape) as-is
 
 import streamlit as st
 import fitz  # PyMuPDF
@@ -26,8 +31,8 @@ def reshape_arabic_text(text):
 
 def normalize_text(text: str) -> str:
     """
-    مهم جداً للنسخة الجديدة من PDFs:
-    يحول Arabic Presentation Forms مثل: ﻓﺎﺗﻮرة / اﻟﻔﺎﺗﻮرة -> فاتورة / الفاتورة
+    Important for NEW PDFs:
+    Converts Arabic presentation forms مثل: ﻓﺎﺗﻮرة / اﻟﻔﺎﺗﻮرة -> فاتورة / الفاتورة
     """
     if text is None:
         return ""
@@ -43,41 +48,50 @@ def extract_metadata(pdf_path):
         with fitz.open(pdf_path) as doc:
             full_text = "\n".join([page.get_text("text") for page in doc])
 
-        # ✅ normalize to support old + new PDFs
+        # ✅ normalize old + new PDFs
         full_text = normalize_text(full_text)
 
         def find_field(text, keywords):
             """
             keywords: string OR list[str]
-            searches for the first match among all keywords
+            Supports BOTH formats:
+              1) key : value
+              2) value : key
+            Returns first match.
             """
             if isinstance(keywords, str):
                 keywords = [keywords]
 
             for keyword in keywords:
-                pattern = rf"{re.escape(keyword)}\s*[:\s]*([^\n]*)"
-                match = re.search(pattern, text)
-                if match:
-                    value = match.group(1).strip()
-                    if value:
-                        return value
+                # 1) key : value
+                p1 = rf"{re.escape(keyword)}\s*[:：]?\s*([^\n]+)"
+                m1 = re.search(p1, text)
+                if m1 and m1.group(1).strip():
+                    return m1.group(1).strip()
+
+                # 2) value : key
+                p2 = rf"([^\n:：]+)\s*[:：]\s*{re.escape(keyword)}"
+                m2 = re.search(p2, text)
+                if m2 and m2.group(1).strip():
+                    return m2.group(1).strip()
+
             return ""
 
         address_part1 = find_field(full_text, ["رقم السجل", "السجل رقم"])
         address_part2 = find_field(full_text, ["العنوان"])
 
-        # ✅ Customer name: best direct key
+        # ✅ Customer Name supports:
+        # "اسم العميل : مؤسسة ..." OR "مؤسسة ... : اسم العميل"
         customer_name = find_field(full_text, ["اسم العميل", "العميل اسم"])
         customer_name = re.split(r"الرقم الضريبي|رقم السجل|العنوان", customer_name)[0].strip()
 
-        # ✅ Clean address
         full_address = f"{address_part1} {address_part2}".strip()
 
         paid = find_field(full_text, ["مدفوع"])
         balance = find_field(full_text, ["الرصيد المستحق", "المستحق الرصيد"])
 
         metadata = {
-            # ✅ OR search here
+            # ✅ Invoice number supports: "رقم الفاتورة" OR "الفاتورة رقم"
             "Invoice Number": find_field(full_text, ["رقم الفاتورة", "الفاتورة رقم"]),
             "Invoice Date": find_field(full_text, ["تاريخ الفاتورة", "الفاتورة تاريخ"]),
             "Customer Name": customer_name,
@@ -117,37 +131,35 @@ def extract_tables(pdf_path):
             for page in pdf.pages:
                 tables = page.extract_tables() or []
                 for table in tables:
-                    if not table:
-                        continue
+                    if table:
+                        df = pd.DataFrame(table)
+                        df = df.dropna(how="all").reset_index(drop=True)
+                        if df.empty:
+                            continue
 
-                    df = pd.DataFrame(table)
-                    df = df.dropna(how="all").reset_index(drop=True)
-                    if df.empty:
-                        continue
+                        merged_rows = []
+                        temp_row = []
 
-                    merged_rows = []
-                    temp_row = []
+                        for _, row in df.iterrows():
+                            row_values = row.fillna("").astype(str).tolist()
+                            row_values = [reshape_arabic_text(cell) for cell in row_values]
+                            row_values = fix_shifted_rows(row_values)
 
-                    for _, row in df.iterrows():
-                        row_values = row.fillna("").astype(str).tolist()
-                        row_values = [reshape_arabic_text(cell) for cell in row_values]
-                        row_values = fix_shifted_rows(row_values)
-
-                        if is_data_row(row_values):
-                            if temp_row:
-                                combined = [temp_row[0] + " " + row_values[0]] + row_values[1:]
-                                merged_rows.append(combined)
-                                temp_row = []
+                            if is_data_row(row_values):
+                                if temp_row:
+                                    combined = [temp_row[0] + " " + row_values[0]] + row_values[1:]
+                                    merged_rows.append(combined)
+                                    temp_row = []
+                                else:
+                                    merged_rows.append(row_values)
                             else:
-                                merged_rows.append(row_values)
-                        else:
-                            temp_row = row_values
+                                temp_row = row_values
 
-                    if merged_rows:
-                        num_cols = len(merged_rows[0])
-                        headers = ["Total before tax", "الكمية", "Unit price", "Quantity", "Description", "SKU", "إضافي"]
-                        df_cleaned = pd.DataFrame(merged_rows, columns=headers[:num_cols])
-                        all_data.append(df_cleaned)
+                        if merged_rows:
+                            num_cols = len(merged_rows[0])
+                            headers = ["Total before tax", "الكمية", "Unit price", "Quantity", "Description", "SKU", "إضافي"]
+                            df_cleaned = pd.DataFrame(merged_rows, columns=headers[:num_cols])
+                            all_data.append(df_cleaned)
 
             return pd.concat(all_data, ignore_index=True) if all_data else pd.DataFrame()
 
