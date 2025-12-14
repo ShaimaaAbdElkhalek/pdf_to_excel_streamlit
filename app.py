@@ -51,6 +51,26 @@ def extract_metadata(pdf_path):
         # ✅ normalize old + new PDFs
         full_text = normalize_text(full_text)
 
+        
+            def find_amount_by_keywords(text, keywords):
+                """
+                يبحث عن أول رقم يظهر بالقرب من أي كلمة مفتاحية
+                (لا يهتم بشكل الحروف ولا بالترتيب)
+                """
+                text = unicodedata.normalize("NFKC", text)
+            
+                for kw in keywords:
+                    for m in re.finditer(re.escape(kw), text):
+                        start = max(0, m.start() - 40)
+                        end = min(len(text), m.end() + 40)
+                        window = text[start:end]
+            
+                        num = re.search(r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)", window)
+                        if num:
+                            return num.group(1)
+            
+                return ""
+
         def find_field(text, keywords):
             """
             keywords: string OR list[str]
@@ -92,27 +112,6 @@ def extract_metadata(pdf_path):
 
 
 
-
-
-
-def find_amount_by_keywords(text, keywords):
-    """
-    يبحث عن أول رقم يظهر بالقرب من أي كلمة مفتاحية
-    (لا يهتم بشكل الحروف ولا بالترتيب)
-    """
-    text = unicodedata.normalize("NFKC", text)
-
-    for kw in keywords:
-        for m in re.finditer(re.escape(kw), text):
-            start = max(0, m.start() - 40)
-            end = min(len(text), m.end() + 40)
-            window = text[start:end]
-
-            num = re.search(r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)", window)
-            if num:
-                return num.group(1)
-
-    return ""
                 balance = find_amount_by_keywords(
                     full_text,
                     ["الرصيد المستحق", "المستحق الرصيد", "الرصيد"]
