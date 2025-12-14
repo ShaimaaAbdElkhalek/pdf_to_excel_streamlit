@@ -96,7 +96,7 @@ def extract_metadata(pdf_path):
             "Customer Name": customer_name,
             "Address": full_address,
             "Paid": paid,
-            "Balance": find_field(full_text, ["الرصيد المستحق","اﻟﻤﺴﺘﺤﻖ اﻟﺮﺻﯿﺪ"]),
+            "Balance": find_field(full_text, ["اﻟﻤﺴﺘﺤﻖ اﻟﺮﺻﯿﺪ元 ","الرصيد المستحق","اﻟﻤﺴﺘﺤﻖ اﻟﺮﺻﯿﺪ"]),
             "Source File": pdf_path.name
         }
 
