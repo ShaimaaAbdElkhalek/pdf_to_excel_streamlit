@@ -1,7 +1,6 @@
 # streamlit_app.py
 
 import streamlit as st
-import os
 import fitz  # PyMuPDF
 import pdfplumber
 import pandas as pd
@@ -12,54 +11,113 @@ from pathlib import Path
 from io import BytesIO
 import arabic_reshaper
 from bidi.algorithm import get_display
+import unicodedata
 
 # =========================
 # Arabic Helpers
 # =========================
-
 def reshape_arabic_text(text):
     try:
-        reshaped = arabic_reshaper.reshape(text)
-        bidi_text = get_display(reshaped)
-        return bidi_text
-    except:
-        return text
+        if text is None:
+            return ""
+        reshaped = arabic_reshaper.reshape(str(text))
+        return get_display(reshaped)
+    except Exception:
+        return str(text) if text is not None else ""
 
-# =========================
-# Metadata Extraction (PyMuPDF)
-# =========================
+def normalize_arabic_unicode(text: str) -> str:
+    """
+    Convert Arabic presentation forms (ﻓﺎﺗﻮرة / اﻟﻔﺎﺗﻮرة ...) to normal Arabic (فاتورة / الفاتورة ...)
+    so regex keywords match in BOTH old and new PDFs.
+    """
+    if text is None:
+        return ""
+    text = str(text)
+    # Convert compatibility forms to canonical where possible
+    text = unicodedata.normalize("NFKC", text)
+    # normalize spaces
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
-def extract_metadata(pdf_path):
+def clean_money(x: str) -> str:
+    if x is None:
+        return ""
+    x = str(x)
+    x = x.replace("٫", ".").replace("٬", ",")
+    x = re.sub(r"[^\d\.,]", "", x)
+    x = x.replace(",", "")
+    return x.strip()
+
+def to_float_safe(x):
+    s = clean_money(x)
+    if not s:
+        return None
     try:
+        return float(s)
+    except Exception:
+        return None
+
+# =========================
+# Metadata Extraction (PyMuPDF + fallback)
+# =========================
+def extract_metadata(pdf_path: Path):
+    try:
+        # 1) Read text
+        full_text = ""
         with fitz.open(pdf_path) as doc:
-            full_text = "\n".join([page.get_text() for page in doc])
+            full_text = "\n".join([page.get_text("text") for page in doc])
 
-        def find_field(text, keyword):
-            pattern = rf"{keyword}[:\s]*([^\n]*)"
-            match = re.search(pattern, text)
-            return match.group(1).strip() if match else ""
+        # fallback if needed
+        if not full_text or len(full_text) < 50:
+            with pdfplumber.open(pdf_path) as pdf:
+                full_text = "\n".join([(p.extract_text() or "") for p in pdf.pages])
 
-        address_part1 = find_field(full_text, "رقم السجل")
-        address_part2 = find_field(full_text, "العنوان")
+        # 2) Normalize Arabic unicode (CRITICAL FIX)
+        full_text = normalize_arabic_unicode(full_text)
 
-        # === Clean customer_name ===
-        raw_customer = find_field(full_text, "فاتورة ضريبية")
-        raw_customer = re.sub(r"اسم العميل.*", "", raw_customer).strip()
-        raw_customer = re.sub(r":.*", "", raw_customer).strip()
+        # 3) Robust field extraction (same line OR next line)
+        def find_field(text, key_variants):
+            """
+            key_variants: list of possible labels to support both old/new layouts
+            """
+            for key in key_variants:
+                # key : value (same line)
+                pat1 = rf"{re.escape(key)}\s*[:：]?\s*([^\n]+)"
+                m = re.search(pat1, text)
+                if m and m.group(1).strip():
+                    return m.group(1).strip()
 
-        # === Clean address ===
-        full_address = f"{address_part1} {address_part2}".strip()
+                # key\nvalue (next line)
+                pat2 = rf"{re.escape(key)}\s*[:：]?\s*\n\s*([^\n]+)"
+                m2 = re.search(pat2, text)
+                if m2 and m2.group(1).strip():
+                    return m2.group(1).strip()
+
+            return ""
+
+        # 4) Use multiple label variants (old vs new)
+        invoice_number = find_field(full_text, ["رقم الفاتورة", "الفاتورة رقم"])
+        invoice_date   = find_field(full_text, ["تاريخ الفاتورة", "الفاتورة تاريخ"])
+
+        customer_name  = find_field(full_text, ["اسم العميل", "العميل اسم"])
+        # customer may wrap into next words; cut before tax/cr/address if present
+        customer_name = re.split(r"الرقم الضريبي|رقم السجل|العنوان", customer_name)[0].strip()
+
+        address_line   = find_field(full_text, ["العنوان"])
+        cr_number      = find_field(full_text, ["رقم السجل", "السجل رقم"])
+
+        paid           = clean_money(find_field(full_text, ["مدفوع"]))
+        balance        = clean_money(find_field(full_text, ["الرصيد المستحق", "المستحق الرصيد"]))
 
         metadata = {
-            "Invoice Number": find_field(full_text, "رقم الفاتورة"),
-            "Invoice Date": find_field(full_text, "تاريخ الفاتورة"),
-            "Customer Name": raw_customer,
-            "Address": full_address,
-            "Paid": find_field(full_text, "مدفوع"),
-            "Balance": find_field(full_text, "الرصيد المستحق"),
+            "Invoice Number": invoice_number,
+            "Invoice Date": invoice_date,
+            "Customer Name": customer_name,
+            "Address": f"{cr_number} {address_line}".strip(),
+            "Paid": paid,
+            "Balance": balance,
             "Source File": pdf_path.name
         }
-
         return metadata
 
     except Exception as e:
@@ -69,9 +127,11 @@ def extract_metadata(pdf_path):
 # =========================
 # Table Extraction (pdfplumber)
 # =========================
-
 def is_data_row(row):
-    return any(str(cell).replace(",", "").replace("٫", ".").replace("٬", ".").replace(" ", "").isdigit() for cell in row)
+    return any(
+        str(cell).replace(",", "").replace("٫", ".").replace("٬", ".").replace(" ", "").isdigit()
+        for cell in row
+    )
 
 def fix_shifted_rows(row):
     if len(row) == 7 and row[3].strip() == "" and row[4].strip() != "":
@@ -81,7 +141,7 @@ def fix_shifted_rows(row):
         row = row[:6]
     return row
 
-def extract_tables(pdf_path):
+def extract_tables(pdf_path: Path):
     try:
         with pdfplumber.open(pdf_path) as pdf:
             all_data = []
@@ -117,6 +177,7 @@ def extract_tables(pdf_path):
                             headers = ["Total before tax", "الكمية", "Unit price", "Quantity", "Description", "SKU", "إضافي"]
                             df_cleaned = pd.DataFrame(merged_rows, columns=headers[:num_cols])
                             all_data.append(df_cleaned)
+
             return pd.concat(all_data, ignore_index=True) if all_data else pd.DataFrame()
 
     except Exception as e:
@@ -126,8 +187,7 @@ def extract_tables(pdf_path):
 # =========================
 # Main Process Function
 # =========================
-
-def process_pdf(pdf_path):
+def process_pdf(pdf_path: Path):
     metadata = extract_metadata(pdf_path)
     table_data = extract_tables(pdf_path)
 
@@ -141,7 +201,6 @@ def process_pdf(pdf_path):
 # =========================
 # Streamlit App UI
 # =========================
-
 st.set_page_config(page_title="Merged Arabic Invoice Extractor", layout="wide")
 st.title("📄 Invoice Extractor Pdf to Excel")
 
@@ -157,8 +216,8 @@ if uploaded_files:
             with open(file_path, "wb") as f:
                 f.write(uploaded_file.read())
 
-            if uploaded_file.name.endswith(".zip"):
-                with zipfile.ZipFile(file_path, 'r') as zip_ref:
+            if uploaded_file.name.lower().endswith(".zip"):
+                with zipfile.ZipFile(file_path, "r") as zip_ref:
                     zip_ref.extractall(temp_dir)
                 for pdf in temp_dir.glob("*.pdf"):
                     pdf_paths.append(pdf)
@@ -177,25 +236,13 @@ if uploaded_files:
 
             # ======== Cleaning Steps ========
             if "Total before tax" in final_df.columns:
-                final_df["Total before tax"] = (
-                    final_df["Total before tax"].astype(str)
-                    .str.replace(r"[^\d.,]", "", regex=True)
-                    .str.replace(",", "", regex=False)
-                    .replace("", None)
-                    .astype(float)
-                )
-                final_df["VAT 15%"] = (final_df["Total before tax"] * 0.15).round(2)
-                final_df["Total after tax"] = (final_df["Total before tax"] + final_df["VAT 15%"]).round(2)
+                final_df["Total before tax"] = final_df["Total before tax"].apply(to_float_safe)
+                final_df["VAT 15%"] = (final_df["Total before tax"].fillna(0) * 0.15).round(2)
+                final_df["Total after tax"] = (final_df["Total before tax"].fillna(0) + final_df["VAT 15%"]).round(2)
 
             for col in ["Paid", "Balance"]:
                 if col in final_df.columns:
-                    final_df[col] = (
-                        final_df[col].astype(str)
-                        .str.replace(r"[^\d.,]", "", regex=True)
-                        .str.replace(",", "", regex=False)
-                        .replace("", None)
-                        .astype(float)
-                    )
+                    final_df[col] = final_df[col].apply(to_float_safe)
 
             # ======== Fix Invoice Date to MM/DD/YYYY ========
             if "Invoice Date" in final_df.columns:
@@ -207,16 +254,21 @@ if uploaded_files:
 
             # ======== Keep only required columns in order ========
             required_columns = [
-                "Invoice Number", "Invoice Date", "Customer Name", "Balance","Paid", "Address", 
+                "Invoice Number", "Invoice Date", "Customer Name", "Balance", "Paid", "Address",
                 "Total before tax", "VAT 15%", "Total after tax",
                 "Unit price", "Quantity", "Description", "SKU",
                 "Source File"
             ]
 
+            # Ensure all required columns exist
+            for c in required_columns:
+                if c not in final_df.columns:
+                    final_df[c] = None
+
             final_df = final_df.reindex(columns=required_columns)
 
             st.success("✅ Extraction & cleaning complete!")
-            st.dataframe(final_df)
+            st.dataframe(final_df, use_container_width=True)
 
             output = BytesIO()
             final_df.to_excel(output, index=False, engine="openpyxl")
@@ -228,6 +280,5 @@ if uploaded_files:
                 file_name="Merged_Invoice_Data.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-
         else:
             st.warning("⚠️ No data extracted from the uploaded files.")
