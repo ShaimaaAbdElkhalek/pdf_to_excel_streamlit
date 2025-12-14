@@ -1,7 +1,8 @@
 # streamlit_app.py
 
 import streamlit as st
-import fitz
+import os
+import fitz  # PyMuPDF
 import pdfplumber
 import pandas as pd
 import re
@@ -9,213 +10,224 @@ import tempfile
 import zipfile
 from pathlib import Path
 from io import BytesIO
-import unicodedata
+import arabic_reshaper
+from bidi.algorithm import get_display
 
 # =========================
-# TEXT NORMALIZATION
+# Arabic Helpers
 # =========================
-def normalize_text(text):
-    if not text:
-        return ""
-    text = unicodedata.normalize("NFKC", text)
-    text = text.replace("٫", ".").replace("٬", ",")
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
 
-def clean_money(x):
-    if not x:
-        return ""
-    x = normalize_text(x)
-    x = re.sub(r"[^\d\.,]", "", x)
-    return x.replace(",", "")
-
-def to_float_safe(x):
+def reshape_arabic_text(text):
     try:
-        return float(clean_money(x))
+        reshaped = arabic_reshaper.reshape(text)
+        bidi_text = get_display(reshaped)
+        return bidi_text
     except:
-        return None
+        return text
 
 # =========================
-# ORDER-INDEPENDENT FIND
+# Metadata Extraction (PyMuPDF)
 # =========================
-def find_by_tokens(text, tokens, value_pattern):
-    """
-    Finds a value near given tokens (any order, any line)
-    """
-    text = normalize_text(text)
 
-    for m in re.finditer(value_pattern, text):
-        start, end = m.span()
-        window = text[max(0, start-50): min(len(text), end+50)]
-
-        if all(tok in window for tok in tokens):
-            return m.group(1)
-
-    return ""
-
-# =========================
-# METADATA EXTRACTION
-# =========================
 def extract_metadata(pdf_path):
     try:
-        # Read text
         with fitz.open(pdf_path) as doc:
-            text = " ".join(p.get_text("text") for p in doc)
+            full_text = "\n".join([page.get_text() for page in doc])
 
-        if not text.strip():
-            with pdfplumber.open(pdf_path) as pdf:
-                text = " ".join(p.extract_text() or "" for p in pdf.pages)
+        def find_field(text, keyword):
+            pattern = rf"{keyword}[:\s]*([^\n]*)"
+            match = re.search(pattern, text)
+            return match.group(1).strip() if match else ""
 
-        text = normalize_text(text)
+        address_part1 = find_field(full_text, "رقم السجل")
+        address_part2 = find_field(full_text, "العنوان")
 
-        invoice_number = find_by_tokens(
-            text,
-            tokens=["فاتورة", "رقم"],
-            value_pattern=r"(\d{3,})"
-        )
+        # === Clean customer_name ===
+        raw_customer = find_field(full_text, "فاتورة ضريبية")
+        raw_customer = re.sub(r"اسم العميل.*", "", raw_customer).strip()
+        raw_customer = re.sub(r":.*", "", raw_customer).strip()
 
-        invoice_date = find_by_tokens(
-            text,
-            tokens=["فاتورة", "تاريخ"],
-            value_pattern=r"(\d{2}/\d{2}/\d{4})"
-        )
+        # === Clean address ===
+        full_address = f"{address_part1} {address_part2}".strip()
 
-        customer = find_by_tokens(
-            text,
-            tokens=["اسم", "العميل"],
-            value_pattern=r"(?:اسم العميل|العميل اسم)\s*([^\d]+?)\s*(?:الرقم|رقم|العنوان)"
-        )
-
-        address = find_by_tokens(
-            text,
-            tokens=["العنوان"],
-            value_pattern=r"العنوان\s*[:：]?\s*([^\d]+?)\s*(?:البند|الوصف|الرياض|جدة)"
-        )
-
-        paid = find_by_tokens(
-            text,
-            tokens=["مدفوع"],
-            value_pattern=r"مدفوع\s*([0-9.,]+)"
-        )
-
-        balance = find_by_tokens(
-            text,
-            tokens=["الرصيد", "المستحق"],
-            value_pattern=r"الرصيد المستحق\s*([0-9.,]+)"
-        )
-
-        return {
-            "Invoice Number": invoice_number,
-            "Invoice Date": invoice_date,
-            "Customer Name": customer,
-            "Address": address,
-            "Paid": paid,
-            "Balance": balance,
+        metadata = {
+            "Invoice Number": find_field(full_text, "رقم الفاتورة"),
+            "Invoice Date": find_field(full_text, "تاريخ الفاتورة"),
+            "Customer Name": raw_customer,
+            "Address": full_address,
+            "Paid": find_field(full_text, "مدفوع"),
+            "Balance": find_field(full_text, "الرصيد المستحق"),
             "Source File": pdf_path.name
         }
 
+        return metadata
+
     except Exception as e:
-        st.error(f"Metadata error in {pdf_path.name}: {e}")
+        st.error(f"❌ Error extracting metadata from {pdf_path.name}: {e}")
         return {}
 
 # =========================
-# TABLE EXTRACTION
+# Table Extraction (pdfplumber)
 # =========================
+
 def is_data_row(row):
-    return any(
-        str(c).replace(",", "").replace(".", "").isdigit()
-        for c in row
-    )
+    return any(str(cell).replace(",", "").replace("٫", ".").replace("٬", ".").replace(" ", "").isdigit() for cell in row)
+
+def fix_shifted_rows(row):
+    if len(row) == 7 and row[3].strip() == "" and row[4].strip() != "":
+        row[3] = row[4]
+        row[4] = row[5]
+        row[5] = row[6]
+        row = row[:6]
+    return row
 
 def extract_tables(pdf_path):
-    rows = []
-
     try:
         with pdfplumber.open(pdf_path) as pdf:
+            all_data = []
             for page in pdf.pages:
-                for table in page.extract_tables() or []:
-                    for row in table:
-                        if row and is_data_row(row):
-                            rows.append(row)
+                tables = page.extract_tables()
+                for table in tables:
+                    if table:
+                        df = pd.DataFrame(table)
+                        df = df.dropna(how="all").reset_index(drop=True)
+                        if df.empty:
+                            continue
 
-        if not rows:
-            return pd.DataFrame()
+                        merged_rows = []
+                        temp_row = []
 
-        df = pd.DataFrame(rows)
-        df.columns = ["Description", "Quantity", "Unit price", "Total before tax"][:len(df.columns)]
-        return df
+                        for _, row in df.iterrows():
+                            row_values = row.fillna("").astype(str).tolist()
+                            row_values = [reshape_arabic_text(cell) for cell in row_values]
+                            row_values = fix_shifted_rows(row_values)
+
+                            if is_data_row(row_values):
+                                if temp_row:
+                                    combined = [temp_row[0] + " " + row_values[0]] + row_values[1:]
+                                    merged_rows.append(combined)
+                                    temp_row = []
+                                else:
+                                    merged_rows.append(row_values)
+                            else:
+                                temp_row = row_values
+
+                        if merged_rows:
+                            num_cols = len(merged_rows[0])
+                            headers = ["Total before tax", "الكمية", "Unit price", "Quantity", "Description", "SKU", "إضافي"]
+                            df_cleaned = pd.DataFrame(merged_rows, columns=headers[:num_cols])
+                            all_data.append(df_cleaned)
+            return pd.concat(all_data, ignore_index=True) if all_data else pd.DataFrame()
 
     except Exception as e:
-        st.error(f"Table error in {pdf_path.name}: {e}")
+        st.error(f"❌ Error extracting table from {pdf_path.name}: {e}")
         return pd.DataFrame()
 
 # =========================
-# PROCESS PDF
+# Main Process Function
 # =========================
+
 def process_pdf(pdf_path):
-    meta = extract_metadata(pdf_path)
-    table = extract_tables(pdf_path)
+    metadata = extract_metadata(pdf_path)
+    table_data = extract_tables(pdf_path)
 
-    if not table.empty:
-        for k, v in meta.items():
-            table[k] = v
-        return table
-
-    return pd.DataFrame([meta])
+    if not table_data.empty:
+        for key, value in metadata.items():
+            table_data[key] = value
+        return table_data
+    else:
+        return pd.DataFrame([metadata])
 
 # =========================
-# STREAMLIT UI
+# Streamlit App UI
 # =========================
-st.set_page_config(page_title="Arabic Invoice Extractor", layout="wide")
-st.title("📄 Arabic Invoice Extractor (Order-Independent)")
 
-files = st.file_uploader("Upload PDFs or ZIP", type=["pdf", "zip"], accept_multiple_files=True)
+st.set_page_config(page_title="Merged Arabic Invoice Extractor", layout="wide")
+st.title("📄 Invoice Extractor Pdf to Excel")
 
-if files:
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-        pdfs = []
+uploaded_files = st.file_uploader("Upload PDF files", type=["pdf", "zip"], accept_multiple_files=True)
 
-        for f in files:
-            path = tmp / f.name
-            path.write_bytes(f.read())
+if uploaded_files:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir = Path(temp_dir)
+        pdf_paths = []
 
-            if path.suffix.lower() == ".zip":
-                with zipfile.ZipFile(path) as z:
-                    z.extractall(tmp)
-                pdfs.extend(tmp.glob("*.pdf"))
+        for uploaded_file in uploaded_files:
+            file_path = temp_dir / uploaded_file.name
+            with open(file_path, "wb") as f:
+                f.write(uploaded_file.read())
+
+            if uploaded_file.name.endswith(".zip"):
+                with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                    zip_ref.extractall(temp_dir)
+                for pdf in temp_dir.glob("*.pdf"):
+                    pdf_paths.append(pdf)
             else:
-                pdfs.append(path)
+                pdf_paths.append(file_path)
 
         all_data = []
-        for pdf in pdfs:
-            st.write("Processing:", pdf.name)
-            df = process_pdf(pdf)
+        for pdf_path in pdf_paths:
+            st.write(f"📄 Processing: {pdf_path.name}")
+            df = process_pdf(pdf_path)
             if not df.empty:
                 all_data.append(df)
 
         if all_data:
-            final = pd.concat(all_data, ignore_index=True)
+            final_df = pd.concat(all_data, ignore_index=True)
 
-            final["Paid"] = final["Paid"].apply(to_float_safe)
-            final["Balance"] = final["Balance"].apply(to_float_safe)
+            # ======== Cleaning Steps ========
+            if "Total before tax" in final_df.columns:
+                final_df["Total before tax"] = (
+                    final_df["Total before tax"].astype(str)
+                    .str.replace(r"[^\d.,]", "", regex=True)
+                    .str.replace(",", "", regex=False)
+                    .replace("", None)
+                    .astype(float)
+                )
+                final_df["VAT 15%"] = (final_df["Total before tax"] * 0.15).round(2)
+                final_df["Total after tax"] = (final_df["Total before tax"] + final_df["VAT 15%"]).round(2)
 
-            final["Invoice Date"] = pd.to_datetime(
-                final["Invoice Date"], errors="coerce", dayfirst=True
-            ).dt.strftime("%m/%d/%Y")
+            for col in ["Paid", "Balance"]:
+                if col in final_df.columns:
+                    final_df[col] = (
+                        final_df[col].astype(str)
+                        .str.replace(r"[^\d.,]", "", regex=True)
+                        .str.replace(",", "", regex=False)
+                        .replace("", None)
+                        .astype(float)
+                    )
 
-            st.success("✅ Extraction complete")
-            st.dataframe(final)
+            # ======== Fix Invoice Date to MM/DD/YYYY ========
+            if "Invoice Date" in final_df.columns:
+                final_df["Invoice Date"] = pd.to_datetime(
+                    final_df["Invoice Date"],
+                    errors="coerce",
+                    dayfirst=True
+                ).dt.strftime("%m/%d/%Y")
+
+            # ======== Keep only required columns in order ========
+            required_columns = [
+                "Invoice Number", "Invoice Date", "Customer Name", "Balance","Paid", "Address", 
+                "Total before tax", "VAT 15%", "Total after tax",
+                "Unit price", "Quantity", "Description", "SKU",
+                "Source File"
+            ]
+
+            final_df = final_df.reindex(columns=required_columns)
+
+            st.success("✅ Extraction & cleaning complete!")
+            st.dataframe(final_df)
 
             output = BytesIO()
-            final.to_excel(output, index=False)
+            final_df.to_excel(output, index=False, engine="openpyxl")
             output.seek(0)
 
             st.download_button(
-                "📥 Download Excel",
-                output,
-                "Invoices.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                label="📥 Download Excel",
+                data=output,
+                file_name="Merged_Invoice_Data.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+
         else:
-            st.warning("⚠️ No data extracted")
+            st.warning("⚠️ No data extracted from the uploaded files.")
