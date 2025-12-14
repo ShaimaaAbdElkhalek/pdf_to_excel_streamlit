@@ -52,7 +52,6 @@ def extract_metadata(pdf_path):
 
         metadata = {
             "Invoice Number": find_field(full_text, "رقم الفاتورة"),
-            "Invoice Number": find_field(full_text, "الفاتورة رقم"),
             "Invoice Date": find_field(full_text, "تاريخ الفاتورة"),
             "Customer Name": raw_customer,
             "Address": full_address,
