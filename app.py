@@ -82,21 +82,10 @@ def extract_metadata(pdf_path):
 
       
 
-                # === Clean customer_name (works with اسم العميل OR العميل اسم) ===
-        customer_line = find_field(full_text, ["اسم العميل", "العميل اسم"])
-        
-        # Try: KEY : VALUE
-        m = re.search(r"(?:اسم العميل|العميل اسم)\s*[:：]\s*(.+)", customer_line)
-        if m:
-            customer_name = m.group(1).strip()
-        else:
-            # Try: VALUE : KEY
-            m = re.search(r"(.+?)\s*[:：]\s*(?:اسم العميل|العميل اسم)", customer_line)
-            customer_name = m.group(1).strip() if m else customer_line.strip()
-        
-        # If the new PDF splits customer name into next line "الغذائية", append it
-        # (look at the raw text around that match)
-        customer_name = re.split(r"الرقم الضريبي|رقم السجل|العنوان", customer_name)[0].strip()
+          # === Clean customer_name ===
+        customer_namer = find_field(full_text,["فاتورة ضريبية", "ﺿﺮﻳﺒﯿﺔ ﻓﺎﺗﻮرة","ﺿﺮﻳﺒﯿﺔ ﻓﺎﺗﻮرة","اﻟﺠﻮال رﻗﻢ"])
+        customer_name = re.sub(r"العميل اسم.*", "", customer_namer).strip()
+        customer_name = re.sub(r":.*", "", customer_namer).strip()
 
 
         
