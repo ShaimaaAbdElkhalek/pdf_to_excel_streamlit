@@ -88,7 +88,39 @@ def extract_metadata(pdf_path):
         full_address = f"{address_part1} {address_part2}".strip()
 
         paid = find_field(full_text, ["مدفوع"])
-        balance=find_field( full_text, ["الرصيد المستحق", "المستحق الرصيد"])
+
+
+
+
+
+
+
+def find_amount_by_keywords(text, keywords):
+    """
+    يبحث عن أول رقم يظهر بالقرب من أي كلمة مفتاحية
+    (لا يهتم بشكل الحروف ولا بالترتيب)
+    """
+    text = unicodedata.normalize("NFKC", text)
+
+    for kw in keywords:
+        for m in re.finditer(re.escape(kw), text):
+            start = max(0, m.start() - 40)
+            end = min(len(text), m.end() + 40)
+            window = text[start:end]
+
+            num = re.search(r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)", window)
+            if num:
+                return num.group(1)
+
+    return ""
+
+balance = find_amount_by_keywords(
+    full_text,
+    ["الرصيد المستحق", "المستحق الرصيد", "الرصيد"]
+)
+
+
+        
         metadata = {
             # ✅ Invoice number supports: "رقم الفاتورة" OR "الفاتورة رقم"
             "Invoice Number": find_field(full_text, ["رقم الفاتورة", "الفاتورة رقم"]),
