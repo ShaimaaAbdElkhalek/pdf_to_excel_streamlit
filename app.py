@@ -52,7 +52,7 @@ def extract_metadata(pdf_path):
         full_text = normalize_text(full_text)
 
         
-            def find_amount_by_keywords(text, keywords):
+     def find_amount_by_keywords(text, keywords):
                 """
                 يبحث عن أول رقم يظهر بالقرب من أي كلمة مفتاحية
                 (لا يهتم بشكل الحروف ولا بالترتيب)
