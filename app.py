@@ -96,7 +96,7 @@ def extract_metadata(pdf_path):
             "Customer Name": customer_name,
             "Address": full_address,
             "Paid": paid,
-            "Balance": first_amount(balance),
+            "Balance": balance,
             "Source File": pdf_path.name
         }
 
