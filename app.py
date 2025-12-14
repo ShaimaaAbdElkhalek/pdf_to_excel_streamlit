@@ -88,7 +88,7 @@ def extract_metadata(pdf_path):
         full_address = f"{address_part1} {address_part2}".strip()
 
         paid = find_field(full_text, ["مدفوع"])
-
+        balance=find_field(full_text, ["اﻟﻤﺴﺘﺤﻖ","الرصيد المستحق","اﻟﻤﺴﺘﺤﻖ اﻟﺮﺻﯿﺪ","الرصيد"])
         metadata = {
             # ✅ Invoice number supports: "رقم الفاتورة" OR "الفاتورة رقم"
             "Invoice Number": find_field(full_text, ["رقم الفاتورة", "الفاتورة رقم"]),
@@ -96,7 +96,7 @@ def extract_metadata(pdf_path):
             "Customer Name": customer_name,
             "Address": full_address,
             "Paid": paid,
-            "Balance": find_field(full_text, ["اﻟﻤﺴﺘﺤﻖ","الرصيد المستحق","اﻟﻤﺴﺘﺤﻖ اﻟﺮﺻﯿﺪ","الرصيد"]),
+            "Balance": balance,
             "Source File": pdf_path.name
         }
 
