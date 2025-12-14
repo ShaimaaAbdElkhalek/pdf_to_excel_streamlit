@@ -113,11 +113,10 @@ def find_amount_by_keywords(text, keywords):
                 return num.group(1)
 
     return ""
-
-balance = find_amount_by_keywords(
-    full_text,
-    ["الرصيد المستحق", "المستحق الرصيد", "الرصيد"]
-)
+                balance = find_amount_by_keywords(
+                    full_text,
+                    ["الرصيد المستحق", "المستحق الرصيد", "الرصيد"]
+                )
 
 
         
