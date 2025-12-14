@@ -3,6 +3,7 @@
 # - Works with BOTH: "رقم الفاتورة" OR "الفاتورة رقم"
 # - Works with BOTH: "اسم العميل: X" OR "X : اسم العميل"
 # - Normalizes Arabic presentation forms (new PDFs) using NFKC
+# - Extracts Paid/Balance safely (grabs ONLY the first amount near the keyword)
 # - Keeps your table logic (merge/reshape) as-is
 
 import streamlit as st
@@ -41,6 +42,37 @@ def normalize_text(text: str) -> str:
     return text
 
 # =========================
+# Value Extractors (SAFE)
+# =========================
+AMOUNT_RE = re.compile(r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)")
+
+def first_amount(text: str) -> str:
+    """Return first numeric amount from text (handles commas)."""
+    if not text:
+        return ""
+    text = normalize_text(text)
+    m = AMOUNT_RE.search(text)
+    if not m:
+        return ""
+    return m.group(1)
+
+def first_int(text: str) -> str:
+    """Return first integer token from text."""
+    if not text:
+        return ""
+    text = normalize_text(text)
+    m = re.search(r"\b(\d{3,})\b", text)
+    return m.group(1) if m else ""
+
+def first_date(text: str) -> str:
+    """Return first dd/mm/yyyy or mm/dd/yyyy from text."""
+    if not text:
+        return ""
+    text = normalize_text(text)
+    m = re.search(r"(\d{2}/\d{2}/\d{4})", text)
+    return m.group(1) if m else ""
+
+# =========================
 # Metadata Extraction (PyMuPDF)
 # =========================
 def extract_metadata(pdf_path):
@@ -57,7 +89,7 @@ def extract_metadata(pdf_path):
             Supports BOTH formats:
               1) key : value
               2) value : key
-            Returns first match.
+            Returns the matched "value string" (not yet cleaned).
             """
             if isinstance(keywords, str):
                 keywords = [keywords]
@@ -77,26 +109,36 @@ def extract_metadata(pdf_path):
 
             return ""
 
+        # Address parts
         address_part1 = find_field(full_text, ["رقم السجل", "السجل رقم"])
         address_part2 = find_field(full_text, ["العنوان"])
-
-        # ✅ Customer Name supports:
-        # "اسم العميل : مؤسسة ..." OR "مؤسسة ... : اسم العميل"
-        customer_name = find_field(full_text, ["اسم العميل", "العميل اسم"])
-        customer_name = re.split(r"الرقم الضريبي|رقم السجل|العنوان", customer_name)[0].strip()
-
         full_address = f"{address_part1} {address_part2}".strip()
 
-        paid = find_field(full_text, ["مدفوع"])
+        # Customer (supports both directions)
+        customer_name_raw = find_field(full_text, ["اسم العميل", "العميل اسم"])
+        customer_name = re.split(r"الرقم الضريبي|رقم السجل|العنوان", customer_name_raw)[0].strip()
+
+        # Invoice number/date (extract ONLY the first token)
+        inv_no_raw = find_field(full_text, ["رقم الفاتورة", "الفاتورة رقم"])
+        inv_date_raw = find_field(full_text, ["تاريخ الفاتورة", "الفاتورة تاريخ"])
+
+        invoice_number = first_int(inv_no_raw)
+        invoice_date = first_date(inv_date_raw)
+
+        # Paid / Balance (extract ONLY the first amount near keyword)
+        paid_raw = find_field(full_text, ["مدفوع"])
+        balance_raw = find_field(full_text, ["الرصيد المستحق", "المستحق الرصيد"])
+
+        paid = first_amount(paid_raw)
+        balance = first_amount(balance_raw)
 
         metadata = {
-            # ✅ Invoice number supports: "رقم الفاتورة" OR "الفاتورة رقم"
-            "Invoice Number": find_field(full_text, ["رقم الفاتورة", "الفاتورة رقم"]),
-            "Invoice Date": find_field(full_text, ["تاريخ الفاتورة", "الفاتورة تاريخ"]),
+            "Invoice Number": invoice_number,
+            "Invoice Date": invoice_date,
             "Customer Name": customer_name,
             "Address": full_address,
             "Paid": paid,
-            "Balance": find_field(full_text, ["الرصيد المستحق","اﻟﻤﺴﺘﺤﻖ اﻟﺮﺻﯿﺪ"]),
+            "Balance": balance,
             "Source File": pdf_path.name
         }
 
