@@ -1,9 +1,4 @@
 # streamlit_app.py
-# Full corrected code:
-# - Works with BOTH: "رقم الفاتورة" OR "الفاتورة رقم"
-# - Works with BOTH: "اسم العميل: X" OR "X : اسم العميل"
-# - Normalizes Arabic presentation forms (new PDFs) using NFKC
-# - Keeps your table logic (merge/reshape) as-is
 
 import streamlit as st
 import fitz  # PyMuPDF
@@ -30,15 +25,33 @@ def reshape_arabic_text(text):
         return str(text)
 
 def normalize_text(text: str) -> str:
-    """
-    Important for NEW PDFs:
-    Converts Arabic presentation forms مثل: ﻓﺎﺗﻮرة / اﻟﻔﺎﺗﻮرة -> فاتورة / الفاتورة
-    """
     if text is None:
         return ""
     text = str(text)
-    text = unicodedata.normalize("NFKC", text)
-    return text
+    return unicodedata.normalize("NFKC", text)
+
+# =========================
+# Amount Finder (keyword window)
+# =========================
+def find_amount_by_keywords(text, keywords, window_chars=60):
+    """
+    Finds the FIRST amount near any keyword.
+    Works with: الرصيد المستحق元 58,500.49
+    Also works with presentation forms after NFKC normalization.
+    """
+    text = normalize_text(text)
+
+    for kw in keywords:
+        for m in re.finditer(re.escape(kw), text):
+            start = max(0, m.start() - window_chars)
+            end = min(len(text), m.end() + window_chars)
+            window = text[start:end]
+
+            num = re.search(r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)", window)
+            if num:
+                return num.group(1)
+
+    return ""
 
 # =========================
 # Metadata Extraction (PyMuPDF)
@@ -51,33 +64,13 @@ def extract_metadata(pdf_path):
         # ✅ normalize old + new PDFs
         full_text = normalize_text(full_text)
 
-        
-     def find_amount_by_keywords(text, keywords):
-                """
-                يبحث عن أول رقم يظهر بالقرب من أي كلمة مفتاحية
-                (لا يهتم بشكل الحروف ولا بالترتيب)
-                """
-                text = unicodedata.normalize("NFKC", text)
-            
-                for kw in keywords:
-                    for m in re.finditer(re.escape(kw), text):
-                        start = max(0, m.start() - 40)
-                        end = min(len(text), m.end() + 40)
-                        window = text[start:end]
-            
-                        num = re.search(r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)", window)
-                        if num:
-                            return num.group(1)
-            
-                return ""
-
         def find_field(text, keywords):
             """
             keywords: string OR list[str]
-            Supports BOTH formats:
+            Supports BOTH:
               1) key : value
               2) value : key
-            Returns first match.
+            Returns first matched value string.
             """
             if isinstance(keywords, str):
                 keywords = [keywords]
@@ -99,30 +92,22 @@ def extract_metadata(pdf_path):
 
         address_part1 = find_field(full_text, ["رقم السجل", "السجل رقم"])
         address_part2 = find_field(full_text, ["العنوان"])
+        full_address = f"{address_part1} {address_part2}".strip()
 
-        # ✅ Customer Name supports:
-        # "اسم العميل : مؤسسة ..." OR "مؤسسة ... : اسم العميل"
         customer_name = find_field(full_text, ["اسم العميل", "العميل اسم"])
         customer_name = re.split(r"الرقم الضريبي|رقم السجل|العنوان", customer_name)[0].strip()
 
-        full_address = f"{address_part1} {address_part2}".strip()
+        # ✅ Invoice number/date (two versions)
+        invoice_number = find_field(full_text, ["رقم الفاتورة", "الفاتورة رقم"])
+        invoice_date = find_field(full_text, ["تاريخ الفاتورة", "الفاتورة تاريخ"])
 
-        paid = find_field(full_text, ["مدفوع"])
+        # ✅ Paid & Balance using robust amount finder
+        paid = find_amount_by_keywords(full_text, ["مدفوع"])
+        balance = find_amount_by_keywords(full_text, ["الرصيد المستحق", "المستحق الرصيد", "الرصيد"])
 
-
-
-
-                balance = find_amount_by_keywords(
-                    full_text,
-                    ["الرصيد المستحق", "المستحق الرصيد", "الرصيد"]
-                )
-
-
-        
         metadata = {
-            # ✅ Invoice number supports: "رقم الفاتورة" OR "الفاتورة رقم"
-            "Invoice Number": find_field(full_text, ["رقم الفاتورة", "الفاتورة رقم"]),
-            "Invoice Date": find_field(full_text, ["تاريخ الفاتورة", "الفاتورة تاريخ"]),
+            "Invoice Number": invoice_number,
+            "Invoice Date": invoice_date,
             "Customer Name": customer_name,
             "Address": full_address,
             "Paid": paid,
@@ -304,6 +289,5 @@ if uploaded_files:
                 file_name="Merged_Invoice_Data.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-
         else:
             st.warning("⚠️ No data extracted from the uploaded files.")
