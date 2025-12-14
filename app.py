@@ -80,13 +80,13 @@ def extract_metadata(pdf_path):
         address_part1 = find_field(full_text, ["رقم السجل", "السجل رقم"])
         address_part2 = find_field(full_text, ["العنوان"])
 
-    
+      
 
 
          # === Clean customer_name ===
         customer_namer = find_field(full_text,["فاتورة ضريبية", "ﺿﺮﻳﺒﯿﺔ ﻓﺎﺗﻮرة"])
-        customer_name = re.sub(r"اسم العميل.*", "", raw_customer).strip()
-        customer_name = re.sub(r":.*", "", raw_customer).strip()
+        customer_name = re.sub(r"اسم العميل.*", "", customer_namer).strip()
+        customer_name = re.sub(r":.*", "", customer_namer).strip()
 
         
 
