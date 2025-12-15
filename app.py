@@ -97,24 +97,13 @@ def extract_metadata(pdf_path):
         paid = find_field(full_text, ["مدفوع"])
 
 
-        def extract_balance(full_text):
-            text = normalize_text(full_text)
+        balance =  find_field(
+                    full_text,
+                    ["المستحق الرصيد","الرصيد المستحق"]
+                )
         
-            patterns = [
-                r"الرصيد\s*المستحق\s*([^\n]+)",     # الرصيد المستحق
-                r"المستحق\s*الرصيد\s*([^\n]+)",     # المستحق الرصيد
-            ]
-        
-            for p in patterns:
-                m = re.search(p, text)
-                if m:
-                    # استخرج أول رقم فقط
-                    num = re.search(r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)", m.group(1))
-                    if num:
-                        return num.group(1)
-        
-            return ""
-        balance = extract_balance(full_text)
+        balance_due_pattern = re.compile(r'اﻟﻤﺴﺘﺤﻖ اﻟﺮﺻﯿﺪ\s*([^\n]+)')
+
 
 
         
