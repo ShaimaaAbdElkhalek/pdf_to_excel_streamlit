@@ -103,7 +103,6 @@ def extract_metadata(pdf_path):
 
 
         
-       #### balance=find_field( full_text, ["الرصيد المستحق", "المستحق الرصيد"])
         metadata = {
             # ✅ Invoice number supports: "رقم الفاتورة" OR "الفاتورة رقم"
             "Invoice Number": find_field(full_text, ["رقم الفاتورة", "الفاتورة رقم"]),
