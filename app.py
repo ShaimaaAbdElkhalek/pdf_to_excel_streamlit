@@ -83,7 +83,7 @@ def extract_metadata(pdf_path):
       
 
           # === Clean customer_name ===
-        customer_name = find_field(full_text,["فاتورة ضريبية","ﺿﺮﻳﺒﯿﺔ ", "ﺿﺮﻳﺒﯿﺔ ﻓﺎﺗﻮرة"])
+        customer_name = find_field(full_text,["فاتورة ضريبية","ﺿﺮﻳﺒﯿﺔ", "ﺿﺮﻳﺒﯿﺔ ﻓﺎﺗﻮرة"])
 
 
 
