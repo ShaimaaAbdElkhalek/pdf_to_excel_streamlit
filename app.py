@@ -96,10 +96,10 @@ def extract_metadata(pdf_path):
 
         paid = find_field(full_text, ["مدفوع"])
 
-        #######balance =  find_field(
+      # === balance =  find_field(
             full_text,
             ["الرصيد المستحق", "المستحق الرصيد", "الرصيد"]
-        )###
+        ) # === 
         def extract_balance(full_text):
             text = normalize_text(full_text)
         
