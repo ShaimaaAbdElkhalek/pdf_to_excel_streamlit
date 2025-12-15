@@ -97,12 +97,8 @@ def extract_metadata(pdf_path):
         paid = find_field(full_text, ["مدفوع"])
 
 
-        balance =  find_field(
-                    full_text,
-                    ["المستحق الرصيد","الرصيد المستحق"]
-                )
+        balance =  find_field(full_text,["المستحق الرصيد","الرصيد المستحق","المستحق"])
         
-        balance_due_pattern = re.compile(r'اﻟﻤﺴﺘﺤﻖ اﻟﺮﺻﯿﺪ\s*([^\n]+)')
 
 
 
