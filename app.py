@@ -57,7 +57,8 @@ def extract_metadata(pdf_path):
             "Address": full_address,
             "Paid": find_field(full_text, "مدفوع"),
             "Balance": find_field(full_text, "اإلجمالي"),
-            "Source File": pdf_path.name
+            "Source File": pdf_path.name,
+            "Not Paid": find_field(full_text, "الرصيد المستحق")
         }
 
         return metadata
@@ -210,7 +211,7 @@ if uploaded_files:
                 "Invoice Number", "Invoice Date", "Customer Name", "Balance","Paid", "Address", 
                 "Total before tax", "VAT 15%", "Total after tax",
                 "Unit price", "Quantity", "Description", "SKU",
-                "Source File"
+                "Source File","Not Paid"
             ]
 
             final_df = final_df.reindex(columns=required_columns)
