@@ -188,7 +188,7 @@ if uploaded_files:
                 final_df["VAT 15%"] = (final_df["Total before tax"] * 0.15).round(2)
                 final_df["Total after tax"] = (final_df["Total before tax"] + final_df["VAT 15%"]).round(2)
 
-            for col in ["Paid", "Balance"]:
+            for col in ["Paid", "Balance","Not Paid"]:
                 if col in final_df.columns:
                     final_df[col] = (
                         final_df[col].astype(str)
