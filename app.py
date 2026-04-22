@@ -195,20 +195,25 @@ def extract_items_positional(word_df, text):
                     elif re.search(r"[A-Za-z]", wt):
                         english_blocks.append(wt)
 
-                # SKU = Arabic product name, excluding unit words
-                arabic_blocks_clean = [w for w in arabic_blocks if w not in UNIT_WORDS]
-                sku  = " ".join(arabic_blocks_clean).strip()
-
-                # Description = English product name only (no noise chars)
+                # Description = English words only, no single chars
                 english_blocks_clean = [w for w in english_blocks
-                                        if len(w) > 1 and not re.match(r'^[J|j]$', w)]
+                                        if len(w.strip()) > 1
+                                        and not re.match(r'^[A-Z]$', w.strip())]
                 desc = " ".join(english_blocks_clean).strip()
-                # Remove trailing single chars/noise
-                desc = re.sub(r'\s+[A-Z]\s*$', '', desc).strip()
+
+                # SKU = Arabic + associated numbers/brackets, exclude unit words
+                sku_parts = []
+                for _, w in words_in_row.iterrows():
+                    wt = str(w["text"]).strip()
+                    if wt in UNIT_WORDS:
+                        continue
+                    if re.search(r'[\u0600-\u06FF]', wt) or re.match(r'^[\d\(\)ك]+$', wt):
+                        sku_parts.append(wt)
+                sku = reshape(" ".join(sku_parts).strip())
 
                 if len(nums) >= 2:
                     items.append({
-                        "SKU":         reshape(sku),
+                        "SKU":         sku,
                         "Description": desc,
                         "Quantity":    clean_number(nums[-3]) if len(nums) >= 3 else clean_number(nums[0]),
                         "Unit price":  clean_number(nums[-2]) if len(nums) >= 2 else None,
@@ -236,13 +241,19 @@ def extract_items_positional(word_df, text):
             if len(nums) < 2:
                 continue
 
-            # Description = clean English only
+            # Description = English only, no single chars
             english_parts = re.findall(r"[A-Za-z][A-Za-z0-9\s]*", line)
             desc = " ".join(p.strip() for p in english_parts if len(p.strip()) > 1).strip()
 
-            # SKU = Arabic only, no unit words
-            arabic_raw = re.findall(r"[\u0600-\u06FF]+", line)
-            sku = " ".join(w for w in arabic_raw if w not in UNIT_WORDS).strip()
+            # SKU = Arabic text with numbers/brackets, exclude unit words
+            sku_match = re.search(r'([\u0600-\u06FF][\u0600-\u06FF\s\d\(\)ك]+)', line)
+            if sku_match:
+                raw_sku = sku_match.group(1).strip()
+                sku_words = raw_sku.split()
+                sku = " ".join(w for w in sku_words if w not in UNIT_WORDS).strip()
+            else:
+                arabic_raw = re.findall(r"[\u0600-\u06FF]+", line)
+                sku = " ".join(w for w in arabic_raw if w not in UNIT_WORDS).strip()
 
             items.append({
                 "SKU":         sku,
@@ -270,11 +281,9 @@ def extract_items_native(pdf_path):
                                      and 1 <= len(re.sub(r"[,.\s]","",v)) <= 8]
                         if len(num_cells) < 2:
                             continue
-                        # RTL: [0]=Total [1]=QtyLabel [2]=UnitPrice [3]=Count [4]=Desc [5]=SKU
                         raw_sku  = reshape(vals[5]) if len(vals) > 5 else ""
                         raw_desc = reshape(vals[4]) if len(vals) > 4 else ""
-                        # Clean unit words from SKU
-                        sku_words = [w for w in re.findall(r"[\u0600-\u06FF]+", raw_sku)
+                        sku_words = [w for w in re.findall(r"[\u0600-\u06FF\d\(\)ك]+", raw_sku)
                                      if w not in UNIT_WORDS]
                         items.append({
                             "Unit price":  clean_number(vals[2]) if len(vals) > 2 else None,
