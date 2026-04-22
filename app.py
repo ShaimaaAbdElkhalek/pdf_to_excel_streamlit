@@ -94,6 +94,9 @@ def reconstruct_table_rows(word_df, y_tolerance=15):
 STOP_WORDS = {"اسم","العميل","فاتورة","إلى","إلىة","التتجار",
               "رقم","الفاتورة","تاريخ","الغاتورة"}
 
+UNIT_WORDS = {"كرتونة","كرتون","قطعة","علبة","كيس","طن","كجم","لتر",
+              "كغ","جرام","مل","حبة","رول","باكيت","صندوق"}
+
 def extract_customer_name_text(text):
     m = re.search(
         r"اسم العميل\s*[:\s]+(.+?)(?=الرقم الضريبي|رقم السجل|العنوان)",
@@ -159,7 +162,7 @@ def is_summary_row(vals):
 def extract_items_positional(word_df, text):
     items = []
 
-    # ── Pass 1: positional word positions ────────────────────
+    # ── Pass 1: positional ────────────────────────────────────
     if not word_df.empty:
         rows = reconstruct_table_rows(word_df)
         header_idx = None
@@ -179,7 +182,6 @@ def extract_items_positional(word_df, text):
                 if not t or any(kw in t for kw in SUMMARY_KW):
                     continue
 
-                # Numbers: exclude zero and numbers > 8 digits
                 nums = [n for n in re.findall(r"[\d,]+\.?\d*", t)
                         if len(re.sub(r"[,.]","",n)) <= 8
                         and clean_number(n) not in (0, None)]
@@ -193,13 +195,16 @@ def extract_items_positional(word_df, text):
                     elif re.search(r"[A-Za-z]", wt):
                         english_blocks.append(wt)
 
-                # SKU = rightmost Arabic block (البند column, RTL)
-                sku = " ".join(arabic_blocks[:2]) if arabic_blocks else ""
-                # Description = English text (الوصف column)
-                desc = " ".join(english_blocks).strip()
-                # If no English, use remaining Arabic blocks
-                if not desc and len(arabic_blocks) > 2:
-                    desc = " ".join(arabic_blocks[2:])
+                # SKU = Arabic product name, excluding unit words
+                arabic_blocks_clean = [w for w in arabic_blocks if w not in UNIT_WORDS]
+                sku  = " ".join(arabic_blocks_clean).strip()
+
+                # Description = English product name only (no noise chars)
+                english_blocks_clean = [w for w in english_blocks
+                                        if len(w) > 1 and not re.match(r'^[J|j]$', w)]
+                desc = " ".join(english_blocks_clean).strip()
+                # Remove trailing single chars/noise
+                desc = re.sub(r'\s+[A-Z]\s*$', '', desc).strip()
 
                 if len(nums) >= 2:
                     items.append({
@@ -225,21 +230,23 @@ def extract_items_positional(word_df, text):
             if not in_table:
                 continue
 
-            # Numbers: exclude zero and large numbers (IBAN etc.)
             nums = [n for n in re.findall(r"[\d,]+\.?\d*", line)
                     if len(re.sub(r"[,.]","",n)) <= 8
                     and clean_number(n) not in (0, None)]
             if len(nums) < 2:
                 continue
 
-            # Extract English (Description) and Arabic (SKU)
-            english = " ".join(re.findall(r"[A-Za-z][A-Za-z0-9\s\(\)]*", line)).strip()
-            arabic  = " ".join(re.findall(r"[\u0600-\u06FF\s]+", line)).strip()
-            arabic  = re.sub(r"\s+", " ", arabic).strip()
+            # Description = clean English only
+            english_parts = re.findall(r"[A-Za-z][A-Za-z0-9\s]*", line)
+            desc = " ".join(p.strip() for p in english_parts if len(p.strip()) > 1).strip()
+
+            # SKU = Arabic only, no unit words
+            arabic_raw = re.findall(r"[\u0600-\u06FF]+", line)
+            sku = " ".join(w for w in arabic_raw if w not in UNIT_WORDS).strip()
 
             items.append({
-                "SKU":         arabic,
-                "Description": english,
+                "SKU":         sku,
+                "Description": desc,
                 "Quantity":    clean_number(nums[-3]) if len(nums) >= 3 else clean_number(nums[0]),
                 "Unit price":  clean_number(nums[-2]) if len(nums) >= 2 else None,
             })
@@ -264,11 +271,16 @@ def extract_items_native(pdf_path):
                         if len(num_cells) < 2:
                             continue
                         # RTL: [0]=Total [1]=QtyLabel [2]=UnitPrice [3]=Count [4]=Desc [5]=SKU
+                        raw_sku  = reshape(vals[5]) if len(vals) > 5 else ""
+                        raw_desc = reshape(vals[4]) if len(vals) > 4 else ""
+                        # Clean unit words from SKU
+                        sku_words = [w for w in re.findall(r"[\u0600-\u06FF]+", raw_sku)
+                                     if w not in UNIT_WORDS]
                         items.append({
                             "Unit price":  clean_number(vals[2]) if len(vals) > 2 else None,
                             "Quantity":    clean_number(vals[3]) if len(vals) > 3 else None,
-                            "Description": reshape(vals[4])      if len(vals) > 4 else "",
-                            "SKU":         reshape(vals[5])      if len(vals) > 5 else "",
+                            "Description": raw_desc,
+                            "SKU":         " ".join(sku_words),
                         })
     except:
         pass
@@ -303,29 +315,24 @@ def extract_metadata(pdf_path, text):
         address = " ".join(m.group(1).split()).strip()
         address = re.sub(r"\s*\d{10}\s*$", "", address).strip()
 
-    # VAT is cleanest — use to validate others
     vat = get_amount_clean("القيمة المضافة", "القيمه المضافة")
 
-    # Total before tax
     total_before = get_amount_clean("المجموع")
-    # Fix OCR noise prefix digit (e.g. 470000 → 70000)
     if total_before and vat and vat > 0:
         ratio = total_before / vat
-        if ratio > 10:  # correct ratio ~6.67 (100/15)
+        if ratio > 10:
             s = str(int(total_before))
             if len(s) > 4:
                 candidate = clean_number(s[1:])
                 if candidate and abs(candidate / vat - 100/15) < 1:
                     total_before = candidate
 
-    # Total after tax
     total_after = get_amount_clean("الإجمالي", "الإحمالي", "اإلجمالي", "الاجمالي")
     if not total_after and total_before and vat:
         total_after = round(total_before + vat, 2)
 
     balance = total_after
 
-    # Paid — handle trailing noise like "80,500- 4"
     paid_m = re.search(r"مدفوع[^\d\n]*([\d,٬٫]+\.?\d*)", text)
     paid = clean_number(paid_m.group(1)) if paid_m else None
 
