@@ -9,3 +9,4 @@ arabic_reshaper
 pytesseract
 Pillow
 openpyxl
+
