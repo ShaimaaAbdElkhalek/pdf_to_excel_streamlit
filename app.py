@@ -34,13 +34,10 @@ def extract_name_from_filename(pdf_path):
     return ""
 
 def get_text(pdf_path):
-    # Try native text extraction first
     with fitz.open(pdf_path) as doc:
         text = "\n".join(page.get_text() for page in doc).strip()
     if len(text) > 50:
         return text, "native"
-
-    # Fallback: pdf2image + pytesseract (same as Colab method)
     try:
         from pdf2image import convert_from_path
         images = convert_from_path(str(pdf_path))
@@ -50,7 +47,6 @@ def get_text(pdf_path):
             ocr_text += f"\n--- الصفحة {i+1} ---\n{page_text}\n"
         return ocr_text, "ocr"
     except Exception:
-        # Final fallback: PyMuPDF pixmap method
         ocr_text = ""
         with fitz.open(pdf_path) as doc:
             for page in doc:
@@ -68,7 +64,6 @@ def get_ocr_words(pdf_path):
         with fitz.open(pdf_path) as doc:
             pix = doc[0].get_pixmap(matrix=fitz.Matrix(3, 3))
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-
     data = pytesseract.image_to_data(
         img, lang="ara+eng", config="--psm 6",
         output_type=pytesseract.Output.DATAFRAME
@@ -164,6 +159,7 @@ def is_summary_row(vals):
 def extract_items_positional(word_df, text):
     items = []
 
+    # ── Pass 1: positional word positions ────────────────────
     if not word_df.empty:
         rows = reconstruct_table_rows(word_df)
         header_idx = None
@@ -182,8 +178,12 @@ def extract_items_positional(word_df, text):
                 t = row["text"].strip()
                 if not t or any(kw in t for kw in SUMMARY_KW):
                     continue
+
+                # Numbers: exclude zero and numbers > 8 digits
                 nums = [n for n in re.findall(r"[\d,]+\.?\d*", t)
-                        if len(re.sub(r"[,.]","",n)) <= 8]
+                        if len(re.sub(r"[,.]","",n)) <= 8
+                        and clean_number(n) not in (0, None)]
+
                 words_in_row = row["words"].sort_values("left", ascending=False)
                 arabic_blocks, english_blocks = [], []
                 for _, w in words_in_row.iterrows():
@@ -192,8 +192,15 @@ def extract_items_positional(word_df, text):
                         arabic_blocks.append(wt)
                     elif re.search(r"[A-Za-z]", wt):
                         english_blocks.append(wt)
-                sku  = arabic_blocks[0] if arabic_blocks else ""
-                desc = " ".join(english_blocks) if english_blocks else " ".join(arabic_blocks[1:])
+
+                # SKU = rightmost Arabic block (البند column, RTL)
+                sku = " ".join(arabic_blocks[:2]) if arabic_blocks else ""
+                # Description = English text (الوصف column)
+                desc = " ".join(english_blocks).strip()
+                # If no English, use remaining Arabic blocks
+                if not desc and len(arabic_blocks) > 2:
+                    desc = " ".join(arabic_blocks[2:])
+
                 if len(nums) >= 2:
                     items.append({
                         "SKU":         reshape(sku),
@@ -202,6 +209,7 @@ def extract_items_positional(word_df, text):
                         "Unit price":  clean_number(nums[-2]) if len(nums) >= 2 else None,
                     })
 
+    # ── Pass 2: text line fallback ────────────────────────────
     if not items:
         lines = text.split("\n")
         in_table = False
@@ -216,16 +224,23 @@ def extract_items_positional(word_df, text):
                 break
             if not in_table:
                 continue
+
+            # Numbers: exclude zero and large numbers (IBAN etc.)
             nums = [n for n in re.findall(r"[\d,]+\.?\d*", line)
-                    if len(re.sub(r"[,.]","",n)) <= 8]
+                    if len(re.sub(r"[,.]","",n)) <= 8
+                    and clean_number(n) not in (0, None)]
             if len(nums) < 2:
                 continue
-            english = " ".join(re.findall(r"[A-Za-z][A-Za-z\s]*", line)).strip()
-            arabic  = " ".join(re.findall(r"[\u0600-\u06FF]+", line)).strip()
+
+            # Extract English (Description) and Arabic (SKU)
+            english = " ".join(re.findall(r"[A-Za-z][A-Za-z0-9\s\(\)]*", line)).strip()
+            arabic  = " ".join(re.findall(r"[\u0600-\u06FF\s]+", line)).strip()
+            arabic  = re.sub(r"\s+", " ", arabic).strip()
+
             items.append({
                 "SKU":         arabic,
                 "Description": english,
-                "Quantity":    clean_number(nums[-3]) if len(nums) >= 3 else None,
+                "Quantity":    clean_number(nums[-3]) if len(nums) >= 3 else clean_number(nums[0]),
                 "Unit price":  clean_number(nums[-2]) if len(nums) >= 2 else None,
             })
 
@@ -248,6 +263,7 @@ def extract_items_native(pdf_path):
                                      and 1 <= len(re.sub(r"[,.\s]","",v)) <= 8]
                         if len(num_cells) < 2:
                             continue
+                        # RTL: [0]=Total [1]=QtyLabel [2]=UnitPrice [3]=Count [4]=Desc [5]=SKU
                         items.append({
                             "Unit price":  clean_number(vals[2]) if len(vals) > 2 else None,
                             "Quantity":    clean_number(vals[3]) if len(vals) > 3 else None,
@@ -259,7 +275,7 @@ def extract_items_native(pdf_path):
     return items
 
 def extract_metadata(pdf_path, text):
-    def get_amount(*keywords):
+    def get_amount_clean(*keywords):
         for kw in keywords:
             m = re.search(rf"{re.escape(kw)}[^\d\n]*([\d,٬٫]+\.?\d*)", text)
             if m:
@@ -287,13 +303,31 @@ def extract_metadata(pdf_path, text):
         address = " ".join(m.group(1).split()).strip()
         address = re.sub(r"\s*\d{10}\s*$", "", address).strip()
 
-    total_before = get_amount("المجموع")
-    vat          = get_amount("القيمة المضافة","القيمه المضافة")
-    total_after  = get_amount("الإجمالي","الإحمالي","اإلجمالي","الاجمالي")
+    # VAT is cleanest — use to validate others
+    vat = get_amount_clean("القيمة المضافة", "القيمه المضافة")
+
+    # Total before tax
+    total_before = get_amount_clean("المجموع")
+    # Fix OCR noise prefix digit (e.g. 470000 → 70000)
+    if total_before and vat and vat > 0:
+        ratio = total_before / vat
+        if ratio > 10:  # correct ratio ~6.67 (100/15)
+            s = str(int(total_before))
+            if len(s) > 4:
+                candidate = clean_number(s[1:])
+                if candidate and abs(candidate / vat - 100/15) < 1:
+                    total_before = candidate
+
+    # Total after tax
+    total_after = get_amount_clean("الإجمالي", "الإحمالي", "اإلجمالي", "الاجمالي")
     if not total_after and total_before and vat:
         total_after = round(total_before + vat, 2)
+
     balance = total_after
-    paid    = get_amount("مدفوع")
+
+    # Paid — handle trailing noise like "80,500- 4"
+    paid_m = re.search(r"مدفوع[^\d\n]*([\d,٬٫]+\.?\d*)", text)
+    paid = clean_number(paid_m.group(1)) if paid_m else None
 
     return {
         "Invoice Number":   inv_num,
