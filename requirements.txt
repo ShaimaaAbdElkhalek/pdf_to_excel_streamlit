@@ -9,3 +9,5 @@ arabic_reshaper
 pytesseract
 Pillow
 openpyxl
+
+pdf2image
