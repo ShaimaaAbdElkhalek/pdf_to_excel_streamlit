@@ -39,37 +39,29 @@ def get_text(pdf_path):
             ocr_text += pytesseract.image_to_string(img, lang="ara+eng", config="--psm 6") + "\n"
     return ocr_text, "ocr"
 
-# ── Customer name: collect lines after اسم العميل ─────────────
+# ── Customer name: ONLY Arabic words between اسم العميل and رقم الفاتورة ──
 def extract_customer_name(text):
-    """
-    OCR splits the name across lines with noise.
-    Strategy: grab up to 3 lines after اسم العميل,
-    keep only Arabic words, join them.
-    """
-    m = re.search(r"اسم العميل\s*[:\s]+(.+)", text)
-    if not m:
-        return ""
+    # Grab everything between اسم العميل and رقم الفاتورة / قم الغاتورة
+    m = re.search(
+        r"اسم العميل\s*[:\s]+(.+?)(?=(?:رقم الفاتورة|قم الغاتورة|الغاتورة)\s*\d)",
+        text, re.DOTALL
+    )
+    if m:
+        chunk = m.group(1)
+    else:
+        # fallback: grab up to 3 lines after اسم العميل
+        m = re.search(r"اسم العميل\s*[:\s]+(.+)", text)
+        if not m:
+            return ""
+        lines = text[m.start():m.start()+200].split("\n")[:4]
+        chunk = " ".join(lines[1:])  # skip the trigger line itself
 
-    # Get the line with the name trigger + next 2 lines
-    start = m.start()
-    chunk = text[start:start+300]
-    lines = chunk.split("\n")[:4]   # اسم العميل line + 3 after
+    # Keep only Arabic words
+    arabic_words = re.findall(r"[\u0600-\u06FF]+", chunk)
 
-    arabic_words = []
-    for line in lines:
-        # Stop at known boundaries
-        if any(kw in line for kw in [
-            "الرقم الضريبي", "رقم السجل", "العنوان",
-            "تاريخ", "المجموع", "مدفوع", "رقم الحساب"
-        ]):
-            break
-        # Extract only Arabic words (strip OCR noise like ceed, rom, ars, eee...)
-        words = re.findall(r"[\u0600-\u06FF]+", line)
-        arabic_words.extend(words)
-
-    # Remove generic words that are part of the invoice template not the name
-    stop_words = {"اسم", "العميل", "فاتورة", "إلى", "التتجار"}
-    arabic_words = [w for w in arabic_words if w not in stop_words]
+    # Remove template words
+    stop = {"اسم", "العميل", "فاتورة", "إلى", "التتجار", "إلىة"}
+    arabic_words = [w for w in arabic_words if w not in stop]
 
     return " ".join(arabic_words).strip()
 
@@ -96,18 +88,10 @@ def extract_metadata(pdf_path, text):
     date_m = re.search(r"(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})", text)
     inv_date = date_m.group(1) if date_m else ""
 
-    # Customer Name — Arabic-only reconstruction
+    # Customer Name
     cname = extract_customer_name(text)
 
-    # Customer Tax No — 2nd 15-digit number
-    tax_nums = re.findall(r"\b\d{15}\b", text)
-    cust_tax = tax_nums[1] if len(tax_nums) > 1 else (tax_nums[0] if tax_nums else "")
-
-    # Customer CR — after رقم السجل
-    m = re.search(r"رقم السجل\s*[:\s]*(\d+)", text)
-    cust_cr = m.group(1).strip() if m else ""
-
-    # Address — Arabic words between العنوان and financials
+    # Address
     address = ""
     m = re.search(
         r"العنوان\s*[:\s]+(.+?)(?=\n\d{7,}|\n(?:المجموع|مدفوع|رقم الحساب)|\Z)",
@@ -115,7 +99,6 @@ def extract_metadata(pdf_path, text):
     )
     if m:
         address = " ".join(m.group(1).split()).strip()
-        # Remove phone number from end of address
         address = re.sub(r"\s*\d{10}\s*$", "", address).strip()
 
     # Financials
@@ -130,9 +113,7 @@ def extract_metadata(pdf_path, text):
     return {
         "Invoice Number":   inv_num,
         "Invoice Date":     inv_date,
-        "Customer Name":    cname,
-        "Customer Tax No":  cust_tax,
-        "Customer CR":      cust_cr,
+        "Customer Name":    cname,   # ✅ no tax/CR
         "Address":          address,
         "Balance":          balance,
         "Paid":             paid,
@@ -153,13 +134,11 @@ SUMMARY_KW = [
 ]
 
 def is_summary_row(vals):
-    joined = " ".join(vals)
-    return any(kw in joined for kw in SUMMARY_KW)
+    return any(kw in " ".join(vals) for kw in SUMMARY_KW)
 
 def extract_items(pdf_path, text, mode):
     items = []
 
-    # pdfplumber table
     try:
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
@@ -184,7 +163,6 @@ def extract_items(pdf_path, text, mode):
     except:
         pass
 
-    # OCR fallback — between table header and summary
     if not items:
         lines = text.split("\n")
         in_table = False
@@ -211,7 +189,6 @@ def extract_items(pdf_path, text, mode):
                 "SKU":         "",
             })
 
-    # Deduplicate
     seen = set()
     unique = []
     for item in items:
@@ -220,17 +197,15 @@ def extract_items(pdf_path, text, mode):
             seen.add(key)
             unique.append(item)
 
-    # No items found → one blank row (invoice summary only)
     if not unique:
         unique = [{"Unit price": None, "Quantity": None, "Description": "", "SKU": ""}]
 
     return unique
 
-# ── Process PDF ───────────────────────────────────────────────
+# ── Final columns — no Customer Tax No, no Customer CR ────────
 FINAL_COLS = [
     "Invoice Number", "Invoice Date", "Customer Name",
-    "Customer Tax No", "Customer CR", "Address",
-    "Balance", "Paid",
+    "Address", "Balance", "Paid",
     "Total before tax", "VAT 15%", "Total after tax",
     "Unit price", "Quantity", "Description", "SKU",
     "Source File",
