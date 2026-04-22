@@ -34,22 +34,41 @@ def extract_name_from_filename(pdf_path):
     return ""
 
 def get_text(pdf_path):
+    # Try native text extraction first
     with fitz.open(pdf_path) as doc:
         text = "\n".join(page.get_text() for page in doc).strip()
     if len(text) > 50:
         return text, "native"
-    ocr_text = ""
-    with fitz.open(pdf_path) as doc:
-        for page in doc:
-            pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            ocr_text += pytesseract.image_to_string(img, lang="ara+eng", config="--psm 6") + "\n"
-    return ocr_text, "ocr"
+
+    # Fallback: pdf2image + pytesseract (same as Colab method)
+    try:
+        from pdf2image import convert_from_path
+        images = convert_from_path(str(pdf_path))
+        ocr_text = ""
+        for i, image in enumerate(images):
+            page_text = pytesseract.image_to_string(image, lang="ara+eng")
+            ocr_text += f"\n--- الصفحة {i+1} ---\n{page_text}\n"
+        return ocr_text, "ocr"
+    except Exception:
+        # Final fallback: PyMuPDF pixmap method
+        ocr_text = ""
+        with fitz.open(pdf_path) as doc:
+            for page in doc:
+                pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                ocr_text += pytesseract.image_to_string(img, lang="ara+eng", config="--psm 6") + "\n"
+        return ocr_text, "ocr"
 
 def get_ocr_words(pdf_path):
-    with fitz.open(pdf_path) as doc:
-        pix = doc[0].get_pixmap(matrix=fitz.Matrix(3, 3))
-    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    try:
+        from pdf2image import convert_from_path
+        images = convert_from_path(str(pdf_path))
+        img = images[0]
+    except Exception:
+        with fitz.open(pdf_path) as doc:
+            pix = doc[0].get_pixmap(matrix=fitz.Matrix(3, 3))
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
     data = pytesseract.image_to_data(
         img, lang="ara+eng", config="--psm 6",
         output_type=pytesseract.Output.DATAFRAME
