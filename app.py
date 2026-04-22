@@ -7,6 +7,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 from io import BytesIO
+from PIL import Image
+import pytesseract
 import arabic_reshaper
 from bidi.algorithm import get_display
 
@@ -20,14 +22,23 @@ def reshape(text):
 def clean_number(val):
     return re.sub(r"[^\d.]", "", str(val).replace(",", "").replace("٬", "").replace("٫", "."))
 
-# ── Raw text extractor (for debugging) ────────────────────────
-def get_raw_text(pdf_path):
+# ── OCR: convert PDF pages to images then run Tesseract ────────
+def ocr_pdf(pdf_path):
+    """Extract text from scanned PDF using OCR (Arabic + English)."""
+    full_text = ""
     with fitz.open(pdf_path) as doc:
-        return "\n".join(page.get_text() for page in doc)
+        for page in doc:
+            # Render page at high DPI for better OCR accuracy
+            mat = fitz.Matrix(3, 3)  # 3x zoom = ~216 DPI
+            pix = page.get_pixmap(matrix=mat)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            # Run OCR with Arabic + English
+            text = pytesseract.image_to_string(img, lang="ara+eng", config="--psm 6")
+            full_text += text + "\n"
+    return full_text
 
-# ── Flexible field finder ──────────────────────────────────────
+# ── Field finders ──────────────────────────────────────────────
 def find_after(text, *keywords):
-    """Try multiple keywords, return first match found after any of them."""
     for kw in keywords:
         pattern = rf"{re.escape(kw)}\s*[:\-]?\s*([^\n]+)"
         m = re.search(pattern, text)
@@ -38,7 +49,6 @@ def find_after(text, *keywords):
     return ""
 
 def find_first_number(text, *keywords):
-    """Find the first standalone number after a keyword."""
     for kw in keywords:
         pattern = rf"{re.escape(kw)}[^\d\n]*([\d,٬٫\.]+)"
         m = re.search(pattern, text)
@@ -47,43 +57,38 @@ def find_first_number(text, *keywords):
     return ""
 
 # ── Metadata extraction ────────────────────────────────────────
-def extract_metadata(pdf_path):
+def extract_metadata(pdf_path, raw_text):
     try:
-        raw = get_raw_text(pdf_path)
+        raw = raw_text
 
-        # All 15-digit numbers → tax numbers (supplier first, customer second)
+        # Debug: show what we got
         tax_numbers = re.findall(r"\b\d{15}\b", raw)
-        # All 10-digit numbers → CR numbers
         cr_numbers  = re.findall(r"\b\d{10}\b", raw)
 
-        # Invoice number: usually a short number near رقم الفاتورة
-        inv_num = find_after(raw, "رقم الفاتورة")
-        if not inv_num:
-            # fallback: 4-5 digit standalone number
-            m = re.search(r"\b(\d{4,6})\b", raw)
-            inv_num = m.group(1) if m else ""
-
-        # Date: look for DD/MM/YYYY or similar
+        # Date: DD/MM/YYYY
         date_match = re.search(r"(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})", raw)
-        inv_date = date_match.group(1) if date_match else find_after(raw, "تاريخ الفاتورة")
+        inv_date = date_match.group(1) if date_match else ""
 
-        # Customer name: text after اسم العميل
-        cname_match = re.search(r"اسم العميل\s*[:\s]+(.+?)(?:\n)", raw)
-        customer_name = cname_match.group(1).strip() if cname_match else ""
+        # Invoice number: 4-6 digit number
+        inv_match = re.search(r"\b(\d{4,6})\b", raw)
+        inv_num = inv_match.group(1) if inv_match else ""
+
+        # Customer name after اسم العميل
+        cname = find_after(raw, "اسم العميل")
 
         # Address
         addr_match = re.search(r"العنوان\s*[:\s]+(.+?)(?:\n\d|\Z)", raw, re.DOTALL)
         address = addr_match.group(1).strip().replace("\n", "، ") if addr_match else ""
 
-        # Financial totals
-        balance  = find_first_number(raw, "الإجمالي", "اإلجمالي", "المجموع الكلي")
+        # Totals
+        balance  = find_first_number(raw, "الإجمالي", "اإلجمالي", "الاجمالي")
         paid     = find_first_number(raw, "مدفوع")
         not_paid = find_first_number(raw, "الرصيد المستحق", "المبلغ المتبقي")
 
         return {
             "Invoice Number":  inv_num,
             "Invoice Date":    inv_date,
-            "Customer Name":   customer_name,
+            "Customer Name":   cname,
             "Customer Tax No": tax_numbers[1] if len(tax_numbers) > 1 else "",
             "Customer CR":     cr_numbers[1]  if len(cr_numbers)  > 1 else "",
             "Address":         address,
@@ -97,52 +102,47 @@ def extract_metadata(pdf_path):
         st.error(f"❌ Metadata error: {e}")
         return {}
 
-# ── Table extraction ───────────────────────────────────────────
-def is_numeric_row(row):
-    return any(re.sub(r"[,٬٫\s]", "", str(c)).replace(".", "").isdigit() for c in row if c)
+# ── Table extraction from OCR text ────────────────────────────
+def extract_table_from_ocr(raw_text):
+    """Parse lines that look like invoice item rows."""
+    rows = []
+    # Look for lines with numbers that resemble item rows
+    for line in raw_text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        # Line must have at least 2 numbers (qty, price, total)
+        nums = re.findall(r"[\d,٬٫]+\.?\d*", line)
+        if len(nums) >= 2:
+            rows.append({"Raw Line": line, "Numbers": " | ".join(nums)})
 
-def extract_tables(pdf_path):
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            all_rows = []
-            for page in pdf.pages:
-                for table in (page.extract_tables() or []):
-                    for row in table:
-                        if row and is_numeric_row(row):
-                            cleaned = [reshape(str(c)) if c else "" for c in row]
-                            all_rows.append(cleaned)
-
-            if not all_rows:
-                return pd.DataFrame()
-
-            headers = ["Total before tax", "Quantity", "Unit price", "Count", "Description", "SKU"]
-            n = min(len(headers), len(all_rows[0]))
-            return pd.DataFrame(all_rows, columns=headers[:n])
-
-    except Exception as e:
-        st.error(f"❌ Table error: {e}")
-        return pd.DataFrame()
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 # ── Process single PDF ─────────────────────────────────────────
 def process_pdf(pdf_path):
-    meta  = extract_metadata(pdf_path)
-    table = extract_tables(pdf_path)
+    with st.spinner(f"🔍 Running OCR on {pdf_path.name}..."):
+        raw_text = ocr_pdf(pdf_path)
+
+    meta  = extract_metadata(pdf_path, raw_text)
+    table = extract_table_from_ocr(raw_text)
+
     if not table.empty:
         for k, v in meta.items():
             table[k] = v
-        return table
-    return pd.DataFrame([meta])
+        return table, raw_text
+    return pd.DataFrame([meta]), raw_text
 
 # ── Streamlit UI ───────────────────────────────────────────────
 st.set_page_config(page_title="Invoice Extractor", layout="wide")
-st.title("📄 Invoice Extractor — PDF to Excel")
+st.title("📄 Invoice Extractor — PDF to Excel (OCR Mode)")
+
+st.info("🔍 This PDF is **image-based** — using OCR (Tesseract) to extract text.")
 
 uploaded_files = st.file_uploader(
     "Upload PDF or ZIP files", type=["pdf", "zip"], accept_multiple_files=True
 )
 
-# ── DEBUG toggle ───────────────────────────────────────────────
-debug_mode = st.checkbox("🔍 Show raw extracted text (for debugging)", value=False)
+debug_mode = st.checkbox("🔍 Show raw OCR text (for debugging)", value=True)
 
 if uploaded_files:
     with tempfile.TemporaryDirectory() as tmp:
@@ -162,22 +162,19 @@ if uploaded_files:
         all_data = []
         for path in pdf_paths:
             st.write(f"📄 Processing: **{path.name}**")
+            df, raw_text = process_pdf(path)
 
-            # ── Show raw text if debug on ──────────────────────
             if debug_mode:
-                raw = get_raw_text(path)
-                st.subheader("📋 Raw extracted text:")
-                st.text_area("Raw text", raw, height=300)
+                st.subheader("📋 Raw OCR text:")
+                st.text_area("OCR output", raw_text, height=300, key=str(path))
 
-            df = process_pdf(path)
             if not df.empty:
                 all_data.append(df)
 
         if all_data:
             final_df = pd.concat(all_data, ignore_index=True)
 
-            # Clean numerics
-            for col in ["Total before tax", "Balance", "Paid", "Not Paid"]:
+            for col in ["Balance", "Paid", "Not Paid"]:
                 if col in final_df.columns:
                     final_df[col] = (
                         final_df[col].astype(str)
@@ -186,24 +183,10 @@ if uploaded_files:
                         .astype(float)
                     )
 
-            if "Total before tax" in final_df.columns:
-                final_df["VAT 15%"]         = (final_df["Total before tax"] * 0.15).round(2)
-                final_df["Total after tax"] = (final_df["Total before tax"] + final_df["VAT 15%"]).round(2)
-
             if "Invoice Date" in final_df.columns:
                 final_df["Invoice Date"] = pd.to_datetime(
                     final_df["Invoice Date"], errors="coerce", dayfirst=True
                 ).dt.strftime("%m/%d/%Y")
-
-            cols = [
-                "Invoice Number", "Invoice Date", "Customer Name",
-                "Customer Tax No", "Customer CR", "Address",
-                "Balance", "Paid", "Not Paid",
-                "Total before tax", "VAT 15%", "Total after tax",
-                "Unit price", "Quantity", "Count", "Description", "SKU",
-                "Source File",
-            ]
-            final_df = final_df.reindex(columns=cols)
 
             st.success("✅ Done!")
             st.dataframe(final_df)
