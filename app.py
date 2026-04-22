@@ -134,15 +134,6 @@ def extract_customer_name_text(text):
     return " ".join(unique).strip()
 
 def parse_item_line(line):
-    """
-    Smart parser that handles two OCR layouts:
-    Layout A (2445/2975): Arabic SKU | English Desc | qty | price | total
-    Layout B (2832):      Arabic SKU | qty | price | English Desc | total
-
-    Strategy: use English word positions to separate SKU numbers from data numbers.
-    - Numbers AFTER last English word → data (Layout A)
-    - If too few after English → use numbers BEFORE first English + after (Layout B)
-    """
     def get_nums(segment):
         return [n for n in re.findall(r"[\d,]+\.?\d*", segment)
                 if clean_number(n) not in (0, None)
@@ -157,11 +148,9 @@ def parse_item_line(line):
         after_nums  = get_nums(line[last_eng_end:])
         before_nums = get_nums(line[:first_eng_start])
 
-        # Layout A: enough data after English
         if len(after_nums) >= 2:
             data_nums = after_nums
         else:
-            # Layout B: data is before English, total is after
             data_nums = before_nums + after_nums
     else:
         data_nums = get_nums(line)
@@ -169,39 +158,45 @@ def parse_item_line(line):
     if len(data_nums) < 2:
         return None
 
-    # Last number = total (المجموع), candidates = price + qty
     candidates = data_nums[:-1]
 
-    # Unit price: number with decimal point
     unit_price = None
     for n in candidates:
         if "." in str(n):
             unit_price = clean_number(n)
             break
 
-    # Quantity: smallest whole number (العدد is count, smaller than weight)
     whole_nums = [clean_number(n) for n in candidates
                   if "." not in str(n)
                   and clean_number(n) and clean_number(n) != unit_price]
     qty = min(whole_nums) if whole_nums else None
 
-    # Fallback: no decimal found
     if unit_price is None:
         vals = sorted([clean_number(n) for n in candidates if clean_number(n)])
         if len(vals) >= 2:
-            qty        = vals[0]   # smallest = count
-            unit_price = vals[-1]  # largest  = price
+            qty        = vals[0]   
+            unit_price = vals[-1]  
         elif vals:
             unit_price = vals[0]
 
-    # Description = English words (min 3 chars to skip noise like "pS")
     eng_words = re.findall(r"[A-Za-z]{3,}", line)
     desc = " ".join(eng_words).strip()
 
-    # SKU = Arabic + product-name numbers/brackets, minus unit words
+    # ---- UPDATED SKU EXTRACTION LOGIC ----
     sku_match = re.search(r"([\u0600-\u06FF][\u0600-\u06FF\s\d\(\)ك]+)", line)
     if sku_match:
         raw_sku = sku_match.group(1).strip()
+        
+        # Rescue orphaned parenthesized numbers (e.g. "(510)") separated by LTR/RTL mixing
+        orphaned_brackets = re.findall(r"\(\s*\d+\s*\)", line)
+        for b in orphaned_brackets:
+            # Clean up spacing to (123)
+            digits = re.search(r"\d+", b).group()
+            clean_b = f"({digits})"
+            # Append if not already successfully captured in the Arabic block
+            if clean_b not in raw_sku.replace(" ", ""):
+                raw_sku += f" {clean_b}"
+                
         sku = " ".join(w for w in raw_sku.split() if w not in UNIT_WORDS).strip()
     else:
         ar_words = re.findall(r"[\u0600-\u06FF]{2,}", line)
@@ -220,7 +215,6 @@ def parse_item_line(line):
 def extract_items_positional(word_df, text):
     items = []
 
-    # ── Pass 1: positional word positions ────────────────────
     if not word_df.empty:
         rows = reconstruct_table_rows(word_df)
         header_idx = None
@@ -243,7 +237,6 @@ def extract_items_positional(word_df, text):
                 if parsed:
                     items.append(parsed)
 
-    # ── Pass 2: text line fallback (header found) ─────────────
     if not items:
         lines = text.split("\n")
         in_table = False
@@ -262,7 +255,6 @@ def extract_items_positional(word_df, text):
             if parsed:
                 items.append(parsed)
 
-    # ── Pass 3: headerless fallback ───────────────────────────
     if not items:
         for line in text.split("\n"):
             line = line.strip()
@@ -414,6 +406,7 @@ def process_pdf(pdf_path):
 
     rows = [{**meta, **item} for item in unique_items]
     return pd.DataFrame(rows).reindex(columns=FINAL_COLS), mode, text
+
 
 # ── Streamlit UI ──────────────────────────────────────────────
 st.set_page_config(page_title="Invoice Extractor", layout="wide")
