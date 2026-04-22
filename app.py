@@ -39,31 +39,185 @@ def get_text(pdf_path):
             ocr_text += pytesseract.image_to_string(img, lang="ara+eng", config="--psm 6") + "\n"
     return ocr_text, "ocr"
 
-# ── Customer name: ONLY Arabic words between اسم العميل and رقم الفاتورة ──
-def extract_customer_name(text):
-    # Grab everything between اسم العميل and رقم الفاتورة / قم الغاتورة
+# ── OCR with positions (for table reconstruction) ─────────────
+def get_ocr_words(pdf_path):
+    """Return dataframe of words with x,y positions from first page."""
+    with fitz.open(pdf_path) as doc:
+        pix = doc[0].get_pixmap(matrix=fitz.Matrix(3, 3))
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    data = pytesseract.image_to_data(
+        img, lang="ara+eng", config="--psm 6",
+        output_type=pytesseract.Output.DATAFRAME
+    )
+    data = data[data["conf"] > 30].dropna(subset=["text"])
+    data = data[data["text"].str.strip() != ""]
+    return data
+
+# ── Reconstruct table rows from word positions ────────────────
+def reconstruct_table_rows(word_df, y_tolerance=15):
+    """Group words into rows by Y coordinate proximity."""
+    if word_df.empty:
+        return []
+
+    word_df = word_df.copy()
+    word_df["mid_y"] = word_df["top"] + word_df["height"] / 2
+
+    rows = []
+    used = set()
+
+    for idx, word in word_df.iterrows():
+        if idx in used:
+            continue
+        y = word["mid_y"]
+        # Find all words in same horizontal band
+        same_row = word_df[abs(word_df["mid_y"] - y) <= y_tolerance]
+        used.update(same_row.index)
+        # Sort by x position (RTL: highest x = rightmost = first in Arabic)
+        same_row = same_row.sort_values("left", ascending=False)
+        row_text = " ".join(same_row["text"].astype(str).tolist())
+        rows.append({"y": y, "text": row_text, "words": same_row})
+
+    rows.sort(key=lambda r: r["y"])
+    return rows
+
+# ── Customer name from positioned words ───────────────────────
+def extract_customer_name_positional(word_df, fallback_text):
+    """
+    Find اسم العميل label position, then collect Arabic words
+    to its LEFT (same row) and the row below, stopping before
+    the invoice number.
+    """
+    if word_df.empty:
+        return extract_customer_name_text(fallback_text)
+
+    # Find the row containing اسم العميل
+    mask = word_df["text"].str.contains("العميل", na=False)
+    if not mask.any():
+        return extract_customer_name_text(fallback_text)
+
+    label_row = word_df[mask].iloc[0]
+    label_y   = label_row["top"] + label_row["height"] / 2
+    label_x   = label_row["left"]
+
+    # Same row: words to the LEFT of العميل label (Arabic reads RTL, so name is left of label)
+    same_row = word_df[
+        (abs((word_df["top"] + word_df["height"]/2) - label_y) <= 20) &
+        (word_df["left"] < label_x)
+    ].sort_values("left", ascending=False)
+
+    # Next row: words near same x area
+    next_row = word_df[
+        ((word_df["top"] + word_df["height"]/2) > label_y + 5) &
+        ((word_df["top"] + word_df["height"]/2) < label_y + 60)
+    ].sort_values("left", ascending=False)
+
+    candidates = pd.concat([same_row, next_row])
+
+    # Keep only Arabic words, exclude noise and template words
+    stop = {"اسم","العميل","فاتورة","إلى","إلىة","التتجار","رقم","الفاتورة","تاريخ"}
+    arabic_words = []
+    for _, w in candidates.iterrows():
+        t = str(w["text"]).strip()
+        words = re.findall(r"[\u0600-\u06FF]+", t)
+        for word in words:
+            if word not in stop and len(word) > 1:
+                arabic_words.append(word)
+
+    return " ".join(arabic_words).strip() if arabic_words else extract_customer_name_text(fallback_text)
+
+def extract_customer_name_text(text):
+    """Fallback: regex between اسم العميل and invoice number."""
     m = re.search(
         r"اسم العميل\s*[:\s]+(.+?)(?=(?:رقم الفاتورة|قم الغاتورة|الغاتورة)\s*\d)",
         text, re.DOTALL
     )
-    if m:
-        chunk = m.group(1)
-    else:
-        # fallback: grab up to 3 lines after اسم العميل
-        m = re.search(r"اسم العميل\s*[:\s]+(.+)", text)
-        if not m:
-            return ""
-        lines = text[m.start():m.start()+200].split("\n")[:4]
-        chunk = " ".join(lines[1:])  # skip the trigger line itself
+    chunk = m.group(1) if m else ""
+    stop = {"اسم","العميل","فاتورة","إلى","إلىة","التتجار"}
+    words = [w for w in re.findall(r"[\u0600-\u06FF]+", chunk) if w not in stop and len(w) > 1]
+    return " ".join(words).strip()
 
-    # Keep only Arabic words
-    arabic_words = re.findall(r"[\u0600-\u06FF]+", chunk)
+# ── Table items from positioned words ─────────────────────────
+SUMMARY_KW = [
+    "المجموع","مدفوع","الرصيد","القيمة","القيمه",
+    "الإجمالي","الإحمالي","اإلجمالي","الاجمالي",
+    "رقم الحساب","الايبان","IBAN","SA08","Kingdome","المملكة",
+    "رقم الفاتورة","تاريخ","اسم العميل","الرقم الضريبي",
+    "رقم السجل","العنوان","الجوال","السجل التجاري",
+]
 
-    # Remove template words
-    stop = {"اسم", "العميل", "فاتورة", "إلى", "التتجار", "إلىة"}
-    arabic_words = [w for w in arabic_words if w not in stop]
+HEADER_KW = ["البند","الوصف","العدد","سعر الوحدة","الكمية","المجموع","الوحدة"]
 
-    return " ".join(arabic_words).strip()
+def extract_items_positional(word_df, text):
+    """
+    Reconstruct item rows using word Y positions.
+    Table rows = rows that contain numeric values and are
+    BETWEEN the header row and the summary rows.
+    """
+    if word_df.empty:
+        return []
+
+    rows = reconstruct_table_rows(word_df)
+    if not rows:
+        return []
+
+    # Find header row index (contains البند or الوصف)
+    header_idx = None
+    for i, row in enumerate(rows):
+        if any(kw in row["text"] for kw in HEADER_KW):
+            header_idx = i
+            break
+
+    # Find first summary row index (contains المجموع etc.)
+    summary_idx = None
+    start = (header_idx + 1) if header_idx is not None else 0
+    for i, row in enumerate(rows[start:], start=start):
+        if any(kw in row["text"] for kw in SUMMARY_KW):
+            summary_idx = i
+            break
+
+    if header_idx is None or summary_idx is None:
+        return []
+
+    item_rows = rows[header_idx + 1: summary_idx]
+
+    items = []
+    for row in item_rows:
+        t = row["text"].strip()
+        if not t or any(kw in t for kw in SUMMARY_KW):
+            continue
+
+        # Extract numbers (max 8 digits to skip tax/IBAN)
+        nums = [n for n in re.findall(r"[\d,]+\.?\d*", t)
+                if len(re.sub(r"[,.]","",n)) <= 8]
+
+        # Extract description (Arabic + English text)
+        desc_parts = re.findall(r"[\u0600-\u06FF\s]+|[A-Za-z][A-Za-z\s]+", t)
+        desc = " ".join(" ".join(desc_parts).split()).strip()
+
+        # From the word positions, find SKU (rightmost Arabic block)
+        # and Description (middle text block)
+        words_in_row = row["words"].sort_values("left", ascending=False)
+        arabic_blocks = []
+        english_blocks = []
+        for _, w in words_in_row.iterrows():
+            wt = str(w["text"]).strip()
+            if re.search(r"[\u0600-\u06FF]", wt):
+                arabic_blocks.append(wt)
+            elif re.search(r"[A-Za-z]", wt):
+                english_blocks.append(wt)
+
+        sku  = arabic_blocks[0] if arabic_blocks else ""
+        desc = " ".join(english_blocks) if english_blocks else " ".join(arabic_blocks[1:])
+
+        if len(nums) >= 2:
+            items.append({
+                "SKU":         reshape(sku),
+                "Description": desc,
+                "Quantity":    clean_number(nums[-3]) if len(nums) >= 3 else clean_number(nums[-2]),
+                "Unit price":  clean_number(nums[-2]) if len(nums) >= 2 else None,
+            })
+
+    return items
 
 # ── Metadata ──────────────────────────────────────────────────
 def extract_metadata(pdf_path, text):
@@ -74,7 +228,6 @@ def extract_metadata(pdf_path, text):
                 return clean_number(m.group(1))
         return None
 
-    # Invoice Number
     inv_num = ""
     for p in [r"رقم الفاتورة\s*[:\s]*(\d{4,6})",
               r"(?:قم الغاتورة|الغاتورة)\s*(\d{4,6})",
@@ -84,14 +237,9 @@ def extract_metadata(pdf_path, text):
             inv_num = m.group(1).strip()
             break
 
-    # Invoice Date
-    date_m = re.search(r"(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})", text)
+    date_m  = re.search(r"(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})", text)
     inv_date = date_m.group(1) if date_m else ""
 
-    # Customer Name
-    cname = extract_customer_name(text)
-
-    # Address
     address = ""
     m = re.search(
         r"العنوان\s*[:\s]+(.+?)(?=\n\d{7,}|\n(?:المجموع|مدفوع|رقم الحساب)|\Z)",
@@ -101,10 +249,9 @@ def extract_metadata(pdf_path, text):
         address = " ".join(m.group(1).split()).strip()
         address = re.sub(r"\s*\d{10}\s*$", "", address).strip()
 
-    # Financials
     total_before = get_amount("المجموع")
-    vat          = get_amount("القيمة المضافة", "القيمه المضافة")
-    total_after  = get_amount("الإجمالي", "الإحمالي", "اإلجمالي", "الاجمالي")
+    vat          = get_amount("القيمة المضافة","القيمه المضافة")
+    total_after  = get_amount("الإجمالي","الإحمالي","اإلجمالي","الاجمالي")
     if not total_after and total_before and vat:
         total_after = round(total_before + vat, 2)
     balance = total_after
@@ -113,7 +260,6 @@ def extract_metadata(pdf_path, text):
     return {
         "Invoice Number":   inv_num,
         "Invoice Date":     inv_date,
-        "Customer Name":    cname,   # ✅ no tax/CR
         "Address":          address,
         "Balance":          balance,
         "Paid":             paid,
@@ -123,86 +269,7 @@ def extract_metadata(pdf_path, text):
         "Source File":      pdf_path.name,
     }
 
-# ── Item extraction ───────────────────────────────────────────
-SUMMARY_KW = [
-    "المجموع","مدفوع","الرصيد","القيمة","القيمه",
-    "الإجمالي","الإحمالي","اإلجمالي","الاجمالي",
-    "رقم الحساب","الايبان","IBAN","SA08","Kingdome",
-    "المملكة","البند","الوصف","سعر","الكمية","العدد",
-    "رقم الفاتورة","تاريخ","اسم العميل","الرقم الضريبي",
-    "رقم السجل","العنوان","الجوال","السجل التجاري",
-]
-
-def is_summary_row(vals):
-    return any(kw in " ".join(vals) for kw in SUMMARY_KW)
-
-def extract_items(pdf_path, text, mode):
-    items = []
-
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages:
-                for table in (page.extract_tables() or []):
-                    for row in table:
-                        if not row:
-                            continue
-                        vals = [str(c).strip() if c else "" for c in row]
-                        if is_summary_row(vals):
-                            continue
-                        num_cells = [v for v in vals
-                                     if re.sub(r"[,.\s]","",v).isdigit()
-                                     and 1 <= len(re.sub(r"[,.\s]","",v)) <= 8]
-                        if len(num_cells) < 2:
-                            continue
-                        items.append({
-                            "Unit price":  clean_number(vals[2]) if len(vals) > 2 else None,
-                            "Quantity":    clean_number(vals[3]) if len(vals) > 3 else None,
-                            "Description": reshape(vals[4])      if len(vals) > 4 else "",
-                            "SKU":         reshape(vals[5])      if len(vals) > 5 else "",
-                        })
-    except:
-        pass
-
-    if not items:
-        lines = text.split("\n")
-        in_table = False
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            if any(h in line for h in ["البند","الوصف","سعر الوحدة"]):
-                in_table = True
-                continue
-            if in_table and any(kw in line for kw in ["المجموع","القيمة","الإجمالي","الإحمالي","مدفوع"]):
-                break
-            if not in_table:
-                continue
-            nums = [n for n in re.findall(r"[\d,]+\.?\d*", line)
-                    if len(re.sub(r"[,.]","",n)) <= 8]
-            if len(nums) < 2:
-                continue
-            desc = " ".join(re.findall(r"[\u0600-\u06FF A-Za-z]+", line)).strip()
-            items.append({
-                "Unit price":  clean_number(nums[-2]) if len(nums) >= 2 else None,
-                "Quantity":    clean_number(nums[-3]) if len(nums) >= 3 else None,
-                "Description": desc,
-                "SKU":         "",
-            })
-
-    seen = set()
-    unique = []
-    for item in items:
-        key = (item.get("Description",""), item.get("Unit price"), item.get("Quantity"))
-        if key not in seen:
-            seen.add(key)
-            unique.append(item)
-
-    if not unique:
-        unique = [{"Unit price": None, "Quantity": None, "Description": "", "SKU": ""}]
-
-    return unique
-
-# ── Final columns — no Customer Tax No, no Customer CR ────────
+# ── Process PDF ───────────────────────────────────────────────
 FINAL_COLS = [
     "Invoice Number", "Invoice Date", "Customer Name",
     "Address", "Balance", "Paid",
@@ -213,9 +280,45 @@ FINAL_COLS = [
 
 def process_pdf(pdf_path):
     text, mode = get_text(pdf_path)
-    meta  = extract_metadata(pdf_path, text)
-    items = extract_items(pdf_path, text, mode)
-    rows  = [{**meta, **item} for item in items]
+    meta = extract_metadata(pdf_path, text)
+
+    if mode == "ocr":
+        word_df = get_ocr_words(pdf_path)
+        cname   = extract_customer_name_positional(word_df, text)
+        items   = extract_items_positional(word_df, text)
+    else:
+        word_df = pd.DataFrame()
+        cname   = extract_customer_name_text(text)
+        items   = []
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                for page in pdf.pages:
+                    for table in (page.extract_tables() or []):
+                        for row in table:
+                            if not row:
+                                continue
+                            vals = [str(c).strip() if c else "" for c in row]
+                            if any(kw in " ".join(vals) for kw in SUMMARY_KW):
+                                continue
+                            nums = [v for v in vals if re.sub(r"[,.\s]","",v).isdigit()
+                                    and 1 <= len(re.sub(r"[,.\s]","",v)) <= 8]
+                            if len(nums) < 2:
+                                continue
+                            items.append({
+                                "Unit price":  clean_number(vals[2]) if len(vals) > 2 else None,
+                                "Quantity":    clean_number(vals[3]) if len(vals) > 3 else None,
+                                "Description": reshape(vals[4])      if len(vals) > 4 else "",
+                                "SKU":         reshape(vals[5])      if len(vals) > 5 else "",
+                            })
+        except:
+            pass
+
+    meta["Customer Name"] = cname
+
+    if not items:
+        items = [{"Unit price": None, "Quantity": None, "Description": "", "SKU": ""}]
+
+    rows = [{**meta, **item} for item in items]
     return pd.DataFrame(rows).reindex(columns=FINAL_COLS), mode
 
 # ── Streamlit UI ──────────────────────────────────────────────
@@ -256,7 +359,6 @@ if uploaded_files:
 
         if all_data:
             final_df = pd.concat(all_data, ignore_index=True)
-
             if "Invoice Date" in final_df.columns:
                 final_df["Invoice Date"] = pd.to_datetime(
                     final_df["Invoice Date"], errors="coerce", dayfirst=True
