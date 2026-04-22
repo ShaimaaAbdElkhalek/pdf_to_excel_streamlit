@@ -8,24 +8,11 @@ from pathlib import Path
 from io import BytesIO
 
 # =========================
-# Helper Functions
-# =========================
-
-def clean_number(val):
-    """Cleans numeric strings (handles commas, Arabic decimal separators, and negative signs)"""
-    if pd.isna(val) or val is None or val == "":
-        return 0.0
-    # Replace Arabic decimal separator '٫' with '.' and remove commas/spaces
-    val_str = str(val).replace(',', '').replace('٬', '').replace('٫', '.').replace(' ', '')
-    # Extract numeric part (including optional negative sign)
-    match = re.search(r'-?\d+(\.\d+)?', val_str)
-    return float(match.group()) if match else 0.0
-
-# =========================
 # Main Extraction Process
 # =========================
 
 def process_pdf(pdf_path):
+    # Default Dictionary to hold all metadata
     metadata = {
         "Invoice Number": None,
         "Invoice Date": None,
@@ -33,6 +20,9 @@ def process_pdf(pdf_path):
         "Address": None,
         "Paid": None,
         "Balance": None, 
+        "Total before tax": None,
+        "VAT 15%": None,
+        "Total after tax": None,
         "Source File": Path(pdf_path).name
     }
     
@@ -41,80 +31,116 @@ def process_pdf(pdf_path):
     try:
         with pdfplumber.open(pdf_path) as pdf:
             full_text = ""
-            
             for page in pdf.pages:
-                # Extract text for metadata
-                text = page.extract_text()
+                # layout=True forces the text to maintain its visual horizontal spacing 
+                text = page.extract_text(layout=True)
+                if not text:
+                    text = page.extract_text() # Fallback
                 if text:
                     full_text += text + "\n"
 
-                # Extract tables for Line Items & Totals
-                tables = page.extract_tables()
-                for table in tables:
-                    for row in table:
-                        # Clean up None values and standardize row elements
-                        cleaned_row = [str(cell).strip().replace('\n', ' ') if cell else "" for cell in row]
-                        full_row_str = " ".join(cleaned_row)
+            lines = full_text.split('\n')
 
-                        # Check for Invoice Totals (Bottom of the table)
-                        if "مدفوع" in full_row_str:
-                            metadata["Paid"] = cleaned_row[0] if cleaned_row[0] else full_row_str
-                        if "الرصيد المستحق" in full_row_str:
-                            metadata["Balance"] = cleaned_row[0] if cleaned_row[0] else full_row_str
+            for line in lines:
+                # Condense multiple spaces to single spaces for easier reading
+                line_str = " ".join(line.split())
+                if not line_str.strip():
+                    continue
 
-                        # Check for Data/Line Item rows (Looking for 6 columns in this specific layout)
-                        # Layout based on LTR extraction: [Total, Qty Unit, Price, Qty, Desc, SKU]
-                        if len(cleaned_row) >= 6:
-                            price_col = cleaned_row[2].replace(',', '').replace('٫', '.')
-                            qty_col = cleaned_row[3].replace(',', '').replace('٫', '.')
+                # ---------------------------------
+                # 1. METADATA EXTRACTION
+                # ---------------------------------
+                if "رقم" in line_str or "فاتورة" in line_str or "02445" in line_str:
+                    num_match = re.search(r'\b\d{5}\b', line_str)
+                    if num_match and not metadata["Invoice Number"]:
+                        metadata["Invoice Number"] = num_match.group(0)
 
-                            # Ensure it's a data row by verifying Price and Quantity are numbers
-                            if re.search(r'\d', price_col) and re.search(r'\d', qty_col) and "سعر" not in cleaned_row[2]:
-                                table_data.append({
-                                    "Total before tax line": cleaned_row[0],
-                                    "Unit price": cleaned_row[2],
-                                    "Quantity": cleaned_row[3],
-                                    "Description": cleaned_row[4],
-                                    "SKU": cleaned_row[5]
-                                })
+                date_match = re.search(r'\b\d{2}/\d{2}/\d{4}\b', line_str)
+                if date_match and not metadata["Invoice Date"]:
+                    metadata["Invoice Date"] = date_match.group(0)
 
-            # --- Extract Metadata from global text ---
-            
-            # Invoice Number
-            inv_match = re.search(r'(?:رقم الفاتورة)\s*[:]?\s*(\d+)', full_text)
-            if not inv_match: # Fallback for reverse LTR extraction
-                inv_match = re.search(r'(\d+)\s*(?:رقم الفاتورة)', full_text)
-            if inv_match:
-                metadata["Invoice Number"] = inv_match.group(1)
+                if "اسم العميل" in line_str or "لألأة" in line_str:
+                    clean_name = re.sub(r'(اسم العميل|:|فاتورة|ضريبية|رقم|\b\d{5}\b)', '', line_str).strip()
+                    if clean_name:
+                        metadata["Customer Name"] = clean_name
 
-            # Invoice Date
-            date_match = re.search(r'(\d{2}/\d{2}/\d{4})', full_text)
-            if date_match:
-                metadata["Invoice Date"] = date_match.group(1)
+                if "العنوان" in line_str or "محاسن" in line_str:
+                    addr = re.sub(r'(العنوان|:)', '', line_str).strip()
+                    if addr and len(addr) > 5:
+                        metadata["Address"] = addr
 
-            # Customer Name & Address
-            for line in full_text.split('\n'):
-                if "اسم العميل" in line:
-                    # Clean out header text if on the same line
-                    name = line.split("اسم العميل")[-1].replace(":", "").strip()
-                    name = name.split("فاتورة")[0].strip()
-                    if name: metadata["Customer Name"] = name
-                
-                if "العنوان" in line:
-                    addr = line.split("العنوان")[-1].replace(":", "").strip()
-                    if addr: metadata["Address"] = addr
+                # ---------------------------------
+                # 2. TOTALS EXTRACTION
+                # ---------------------------------
+                if "مدفوع" in line_str:
+                    nums = re.findall(r'-?\d{1,3}(?:,\d{3})*(?:\.\d+)?', line_str)
+                    if nums: metadata["Paid"] = nums[-1]
+
+                if "الرصيد المستحق" in line_str or "الرصيد" in line_str:
+                    nums = re.findall(r'-?\d{1,3}(?:,\d{3})*(?:\.\d+)?', line_str)
+                    if nums: metadata["Balance"] = nums[-1]
+
+                if "القيمة المضافة" in line_str:
+                    nums = re.findall(r'\d{1,3}(?:,\d{3})*(?:\.\d+)?', line_str)
+                    if nums: metadata["VAT 15%"] = nums[-1]
+
+                if "الإجمالي" in line_str:
+                    nums = re.findall(r'\d{1,3}(?:,\d{3})*(?:\.\d+)?', line_str)
+                    if nums: metadata["Total after tax"] = nums[-1]
+
+                # Fallback Total before tax from the "المجموع" line before VAT
+                if "المجموع" in line_str and "القيمة" not in line_str:
+                    nums = re.findall(r'\d{1,3}(?:,\d{3})*(?:\.\d+)?', line_str)
+                    if nums and len(nums) == 1: 
+                        metadata["Total before tax"] = nums[-1]
+
+                # ---------------------------------
+                # 3. LINE ITEMS (PRODUCTS) EXTRACTION
+                # ---------------------------------
+                # Detect lines with English characters (e.g., VEAL LEG SAHIBA)
+                eng_desc_match = re.search(r'[A-Za-z\s]{4,}', line_str)
+                if eng_desc_match:
+                    desc = eng_desc_match.group(0).strip()
+                    
+                    # Find all numbers in the row
+                    nums = re.findall(r'\d{1,3}(?:,\d{3})*(?:\.\d+)?', line_str)
+                    
+                    if len(nums) >= 2:
+                        prices = [n for n in nums if '.' in n]
+                        unit_price = prices[0] if prices else "0"
+                        
+                        # Find Qty (Usually an integer without commas or dots)
+                        qtys = [n for n in nums if '.' not in n and ',' not in n and int(n) <= 1000]
+                        qty = qtys[0] if qtys else "0"
+                        
+                        # Extract Arabic SKU by removing known values (English, Prices, Quantities, and specific words like 'كرتونة')
+                        sku_parts = []
+                        for word in line_str.split():
+                            if not re.search(r'[A-Za-z]', word) and word not in ["كرتونة", unit_price, qty]:
+                                if not re.fullmatch(r'\d{1,3}(?:,\d{3})*(?:\.\d+)?', word):
+                                    sku_parts.append(word)
+                        
+                        sku = " ".join(sku_parts)
+                        
+                        table_data.append({
+                            "Unit price": unit_price,
+                            "Quantity": qty,
+                            "Description": desc,
+                            "SKU": sku if len(sku) > 2 else "None"
+                        })
 
     except Exception as e:
         st.error(f"❌ Error extracting data from {Path(pdf_path).name}: {e}")
 
-    # Combine Tables and Metadata
-    if table_data:
-        df = pd.DataFrame(table_data)
-        for key, value in metadata.items():
-            df[key] = value
-        return df
-    else:
-        return pd.DataFrame([metadata])
+    # Combine tables + metadata
+    if not table_data:
+        table_data = [{"Unit price": None, "Quantity": None, "Description": None, "SKU": None}]
+        
+    df = pd.DataFrame(table_data)
+    for key, value in metadata.items():
+        df[key] = value
+        
+    return df
 
 # =========================
 # Streamlit App UI
@@ -153,22 +179,19 @@ if uploaded_files:
         if all_data:
             final_df = pd.concat(all_data, ignore_index=True)
 
-            # ======== Cleaning & Data Formatting ========
+            # ======== Cleaning & Math Formatting ========
             
-            # Clean numeric columns
-            numeric_cols = ["Total before tax line", "Unit price", "Quantity", "Paid", "Balance"]
+            # Clean numeric columns (removes commas, keeps negative minus signs and dots)
+            numeric_cols = ["Total before tax", "VAT 15%", "Total after tax", "Paid", "Balance", "Unit price", "Quantity"]
             for col in numeric_cols:
                 if col in final_df.columns:
-                    final_df[col] = final_df[col].apply(clean_number)
-
-            # Rename line totals 
-            if "Total before tax line" in final_df.columns:
-                final_df.rename(columns={"Total before tax line": "Total before tax"}, inplace=True)
-
-            # Re-calculate VAT & Final Totals per line item mathematically
-            if "Total before tax" in final_df.columns:
-                final_df["VAT 15%"] = (final_df["Total before tax"] * 0.15).round(2)
-                final_df["Total after tax"] = (final_df["Total before tax"] + final_df["VAT 15%"]).round(2)
+                    final_df[col] = (
+                        final_df[col].astype(str)
+                        .str.replace(r'[^\d.-]', '', regex=True) # strip letters/spaces
+                        .replace('', '0')                        # replace blanks
+                        .replace('None', '0')
+                        .astype(float)                           # convert to number
+                    )
 
             # Fix Invoice Date Format (To standard MM/DD/YYYY)
             if "Invoice Date" in final_df.columns:
@@ -178,7 +201,7 @@ if uploaded_files:
                     dayfirst=True
                 ).dt.strftime("%m/%d/%Y")
 
-            # ======== Order & Output ========
+            # ======== Output Columns Order ========
             required_columns = [
                 "Invoice Number", "Invoice Date", "Customer Name", "Balance", "Paid", "Address", 
                 "Total before tax", "VAT 15%", "Total after tax",
@@ -186,7 +209,7 @@ if uploaded_files:
                 "Source File"
             ]
             
-            # Add missing columns as empty to prevent errors
+            # Ensure all required columns exist so the app doesn't crash
             for col in required_columns:
                 if col not in final_df.columns:
                     final_df[col] = None
@@ -206,7 +229,6 @@ if uploaded_files:
                 file_name="Merged_Invoice_Data.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-
         else:
             st.warning("⚠️ No data extracted from the uploaded files.")
 
