@@ -25,6 +25,14 @@ def clean_number(val):
     except:
         return None
 
+def extract_name_from_filename(pdf_path):
+    stem = Path(pdf_path).stem
+    name = re.sub(r"[-_]\d{3,6}$", "", stem).strip()
+    name = re.sub(r"^\d{3,6}[-_]", "", name).strip()
+    if re.search(r"[\u0600-\u06FF]", name):
+        return name
+    return ""
+
 def get_text(pdf_path):
     with fitz.open(pdf_path) as doc:
         text = "\n".join(page.get_text() for page in doc).strip()
@@ -137,7 +145,7 @@ def is_summary_row(vals):
 def extract_items_positional(word_df, text):
     items = []
 
-    # ── Pass 1: positional word positions ────────────────────
+    # Pass 1: positional
     if not word_df.empty:
         rows = reconstruct_table_rows(word_df)
         header_idx = None
@@ -176,7 +184,7 @@ def extract_items_positional(word_df, text):
                         "Unit price":  clean_number(nums[-2]) if len(nums) >= 2 else None,
                     })
 
-    # ── Pass 2: text line fallback ────────────────────────────
+    # Pass 2: text line fallback
     if not items:
         lines = text.split("\n")
         in_table = False
@@ -302,9 +310,12 @@ def process_pdf(pdf_path):
         word_df = pd.DataFrame()
         cname   = extract_customer_name_text(text)
         items   = extract_items_native(pdf_path)
-        # fallback to text parsing if native table empty
         if not items:
             items = extract_items_positional(pd.DataFrame(), text)
+
+    # Fallback: use filename if OCR/regex gave incomplete name
+    if not cname or len(cname) < 4:
+        cname = extract_name_from_filename(pdf_path)
 
     meta["Customer Name"] = cname
 
@@ -388,6 +399,7 @@ if uploaded_files:
             )
         else:
             st.warning("⚠️ No data extracted.")
+            
 
 
 
