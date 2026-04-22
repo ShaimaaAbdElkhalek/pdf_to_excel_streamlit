@@ -25,7 +25,7 @@ def clean_number(val):
     except:
         return None
 
-# ── Text extraction: native first, OCR fallback ───────────────
+# ── Text extraction ───────────────────────────────────────────
 def get_text(pdf_path):
     with fitz.open(pdf_path) as doc:
         text = "\n".join(page.get_text() for page in doc).strip()
@@ -39,73 +39,111 @@ def get_text(pdf_path):
             ocr_text += pytesseract.image_to_string(img, lang="ara+eng", config="--psm 6") + "\n"
     return ocr_text, "ocr"
 
-# ── Metadata: one dict per invoice ────────────────────────────
+# ── Metadata ──────────────────────────────────────────────────
 def extract_metadata(pdf_path, text):
     def first(*patterns):
         for p in patterns:
-            m = re.search(p, text)
+            m = re.search(p, text, re.DOTALL)
             if m:
                 return m.group(1).strip()
         return ""
 
     def get_amount(*keywords):
         for kw in keywords:
-            m = re.search(rf"{re.escape(kw)}[^\d\n]*([\d,٬٫]+)", text)
+            m = re.search(rf"{re.escape(kw)}[^\d\n]*([\d,٬٫]+\.?\d*)", text)
             if m:
                 return clean_number(m.group(1))
         return None
 
-    # Invoice number
+    # ── Invoice Number ────────────────────────────────────────
     inv_num = first(
         r"رقم الفاتورة\s*[:\s]*(\d{4,6})",
         r"(?:قم الغاتورة|الغاتورة)\s*(\d{4,6})",
         r"\b(0\d{4,5})\b"
     )
 
-    # Date
+    # ── Invoice Date ──────────────────────────────────────────
     date_m = re.search(r"(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})", text)
     inv_date = date_m.group(1) if date_m else ""
 
-    # Customer name
+    # ── Customer Name (full name) ─────────────────────────────
+    # Grab everything after اسم العميل until a known boundary
     cname = first(
-        r"اسم العميل\s*[:\s]+(.+?)(?:\n|الرقم|رقم|إلى)",
-        r"العميل\s*[:\s]+(.+?)(?:\n|رقم)"
+        r"اسم العميل\s*[:\s]+(.+?)(?=\n(?:الرقم الضريبي|رقم السجل|العنوان|فاتورة|إلى))",
+        r"اسم العميل\s*[:\s]+(.+?)(?:\n)",
+        r"العميل\s*[:\s]+(.+?)(?:\n)"
     )
-    cname = re.sub(r"(قم الغاتورة|إلى|رقم).*", "", cname).strip()
+    # Clean stray tokens
+    cname = re.sub(r"\s*(قم الغاتورة|إلى|رقم|فاتورة).*", "", cname, flags=re.DOTALL)
+    cname = " ".join(cname.split())   # collapse whitespace / newlines
 
-    # Tax & CR numbers
+    # ── Customer Tax No ───────────────────────────────────────
     tax_nums = re.findall(r"\b\d{15}\b", text)
     cust_tax = tax_nums[1] if len(tax_nums) > 1 else (tax_nums[0] if tax_nums else "")
-    cust_cr  = first(r"رقم السجل\s*[:\s]*(\d+)")
 
-    # Address
-    addr_m = re.search(r"العنوان\s*[:\s]+(.+?)(?:\n\d{4,5}|\Z)", text, re.DOTALL)
+    # ── Customer CR ───────────────────────────────────────────
+    cust_cr = first(r"رقم السجل\s*[:\s]*(\d+)")
+
+    # ── Address ───────────────────────────────────────────────
+    addr_m = re.search(
+        r"العنوان\s*[:\s]+(.+?)(?=\n\d{4,}|\n(?:مدفوع|الإجمالي|الرصيد|رقم الحساب)|\Z)",
+        text, re.DOTALL
+    )
     address = re.sub(r"\s+", " ", addr_m.group(1)).strip() if addr_m else ""
 
+    # ── Financials ────────────────────────────────────────────
+    # Total before tax = المجموع (the subtotal line, NOT الإجمالي)
+    total_before = get_amount("المجموع")
+
+    # VAT = القيمة المضافة
+    vat = get_amount("القيمة المضافة", "القيمه المضافة")
+
+    # Total after tax = الإجمالي / الإحمالي (subtotal + VAT)
+    total_after = get_amount("الإجمالي", "الإحمالي", "اإلجمالي", "الاجمالي")
+
+    # If total_after missing, compute it
+    if not total_after and total_before and vat:
+        total_after = round(total_before + vat, 2)
+
+    # Balance = same as Total after tax
+    balance = total_after
+
+    # Paid = مدفوع
+    paid = get_amount("مدفوع")
+
+    # Not Paid = الرصيد المستحق
+    not_paid = get_amount("الرصيد المستحق")
+
     return {
-        "Invoice Number":  inv_num,
-        "Invoice Date":    inv_date,
-        "Customer Name":   cname,
-        "Customer Tax No": cust_tax,
-        "Customer CR":     cust_cr,
-        "Address":         address,
-        "Subtotal":        get_amount("المجموع"),
-        "VAT 15%":         get_amount("القيمة المضافة", "القيمه المضافة"),
-        "Total":           get_amount("الإجمالي", "الإحمالي", "اإلجمالي", "الاجمالي"),
-        "Paid":            get_amount("مدفوع"),
-        "Not Paid":        get_amount("الرصيد المستحق"),
-        "Source File":     pdf_path.name,
+        "Invoice Number":   inv_num,
+        "Invoice Date":     inv_date,
+        "Customer Name":    cname,
+        "Customer Tax No":  cust_tax,
+        "Customer CR":      cust_cr,
+        "Address":          address,
+        "Balance":          balance,
+        "Paid":             paid,
+        "Total before tax": total_before,
+        "VAT 15%":          vat,
+        "Total after tax":  total_after,
+        "Source File":      pdf_path.name,
     }
 
-# ── Items: one row per product line ───────────────────────────
+# ── Items ─────────────────────────────────────────────────────
+SUMMARY_KEYWORDS = [
+    "المجموع", "مدفوع", "الرصيد", "القيمة", "القيمه",
+    "الإجمالي", "الإحمالي", "اإلجمالي", "رقم الحساب",
+    "الضريبي", "السجل", "البند", "الوصف", "سعر", "الكمية",
+    "العنوان", "الرقم", "فاتورة", "المملكة", "Kingdome",
+]
+
+def is_summary(vals):
+    return any(kw in v for v in vals for kw in SUMMARY_KEYWORDS)
+
 def extract_items(pdf_path, text, mode):
-    """
-    Returns list of dicts:
-    {Description, SKU, Unit price, Quantity, Item Total}
-    """
     items = []
 
-    # ── Try pdfplumber table first (works for native PDFs) ────
+    # ── pdfplumber (native/image table) ──────────────────────
     try:
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
@@ -114,59 +152,56 @@ def extract_items(pdf_path, text, mode):
                         if not row:
                             continue
                         vals = [str(c).strip() if c else "" for c in row]
-                        # Skip header rows and summary rows
-                        skip_keywords = ["المجموع", "مدفوع", "الرصيد", "القيمة",
-                                         "الإجمالي", "الإحمالي", "البند", "الوصف",
-                                         "سعر", "الكمية", "العدد"]
-                        if any(kw in v for v in vals for kw in skip_keywords):
+                        if is_summary(vals):
                             continue
-                        # Row must have at least 2 numeric values
-                        nums = [v for v in vals if re.sub(r"[,.\s]", "", v).isdigit() and len(v) > 0]
+                        nums = [v for v in vals
+                                if re.sub(r"[,.\s]", "", v).isdigit() and len(re.sub(r"[,.\s]", "", v)) > 0]
                         if len(nums) < 2:
                             continue
 
-                        # Column order RTL: Total | Qty(unit) | UnitPrice | Count | Description | SKU
-                        item = {
-                            "Description": reshape(vals[4]) if len(vals) > 4 else "",
-                            "SKU":         reshape(vals[5]) if len(vals) > 5 else "",
+                        # RTL column order:
+                        # [0]=Item Total  [1]=Qty(كرتونة)  [2]=UnitPrice  [3]=Count  [4]=Description  [5]=SKU
+                        items.append({
                             "Unit price":  clean_number(vals[2]) if len(vals) > 2 else None,
-                            "Quantity":    clean_number(vals[1]) if len(vals) > 1 else None,
-                            "Item Total":  clean_number(vals[0]) if len(vals) > 0 else None,
-                        }
-                        # Only add if we got at least description or a total
-                        if item["Description"] or item["Item Total"]:
-                            items.append(item)
+                            "Quantity":    clean_number(vals[3]) if len(vals) > 3 else None,
+                            "Description": reshape(vals[4])      if len(vals) > 4 else "",
+                            "SKU":         reshape(vals[5])      if len(vals) > 5 else "",
+                        })
     except:
         pass
 
-    # ── OCR fallback: parse lines that look like item rows ────
+    # ── OCR fallback ─────────────────────────────────────────
     if not items:
         for line in text.split("\n"):
             line = line.strip()
-            if not line:
-                continue
-            skip = ["المجموع", "مدفوع", "الرصيد", "القيمة", "الإجمالي",
-                    "الإحمالي", "رقم الحساب", "الضريبي", "السجل"]
-            if any(kw in line for kw in skip):
+            if not line or is_summary(line.split()):
                 continue
             nums = re.findall(r"[\d,]+\.?\d*", line)
             if len(nums) >= 2:
                 items.append({
-                    "Description": line,
-                    "SKU":         "",
                     "Unit price":  clean_number(nums[-2]) if len(nums) >= 2 else None,
                     "Quantity":    clean_number(nums[-3]) if len(nums) >= 3 else None,
-                    "Item Total":  clean_number(nums[-1]) if nums else None,
+                    "Description": line,
+                    "SKU":         "",
                 })
 
-    # If still no items, return one empty item row so invoice still appears
-    if not items:
-        items = [{"Description": "", "SKU": "", "Unit price": None,
-                  "Quantity": None, "Item Total": None}]
-    return items
+    # Deduplicate identical item rows
+    seen = set()
+    unique = []
+    for item in items:
+        key = (item.get("Description", ""), item.get("SKU", ""),
+               item.get("Unit price"), item.get("Quantity"))
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+
+    if not unique:
+        unique = [{"Unit price": None, "Quantity": None, "Description": "", "SKU": ""}]
+
+    return unique
 
 
-# ── Process single PDF → one row per item ─────────────────────
+# ── Process PDF ───────────────────────────────────────────────
 def process_pdf(pdf_path):
     text, mode = get_text(pdf_path)
     meta  = extract_metadata(pdf_path, text)
@@ -174,13 +209,34 @@ def process_pdf(pdf_path):
 
     rows = []
     for item in items:
-        row = {**meta, **item}   # invoice fields + item fields merged
+        row = {**meta, **item}
         rows.append(row)
 
-    return pd.DataFrame(rows), mode
+    df = pd.DataFrame(rows)
+
+    # Final column order matching your spec exactly
+    col_order = [
+        "Invoice Number",
+        "Invoice Date",
+        "Customer Name",
+        "Customer Tax No",
+        "Customer CR",
+        "Address",
+        "Balance",
+        "Paid",
+        "Total before tax",
+        "VAT 15%",
+        "Total after tax",
+        "Unit price",
+        "Quantity",
+        "Description",
+        "SKU",
+        "Source File",
+    ]
+    return df.reindex(columns=col_order), mode
 
 
-# ── Streamlit UI ───────────────────────────────────────────────
+# ── Streamlit UI ──────────────────────────────────────────────
 st.set_page_config(page_title="Invoice Extractor", layout="wide")
 st.title("📄 Invoice Extractor — PDF to Excel")
 
@@ -227,17 +283,7 @@ if uploaded_files:
                     final_df["Invoice Date"], errors="coerce", dayfirst=True
                 ).dt.strftime("%m/%d/%Y")
 
-            # Final column order
-            cols = [
-                "Invoice Number", "Invoice Date",
-                "Customer Name", "Customer Tax No", "Customer CR", "Address",
-                "Description", "SKU", "Unit price", "Quantity", "Item Total",
-                "Subtotal", "VAT 15%", "Total", "Paid", "Not Paid",
-                "Source File",
-            ]
-            final_df = final_df.reindex(columns=cols)
-
-            st.success(f"✅ Done! {len(final_df)} total rows")
+            st.success(f"✅ Done! {len(final_df)} total row(s)")
             st.dataframe(final_df)
 
             out = BytesIO()
