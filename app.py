@@ -73,29 +73,23 @@ STOP_WORDS = {"اسم","العميل","فاتورة","إلى","إلىة","الت
               "رقم","الفاتورة","تاريخ","الغاتورة"}
 
 def extract_customer_name_text(text):
-    part1_words = []
-    m1 = re.search(
-        r"اسم العميل\s*[:\s]+(.+?)(?=\s*(?:قم الغاتورة|رقم الفاتورة)\s*\d)",
-        text
-    )
-    if m1:
-        part1_words = [w for w in re.findall(r"[\u0600-\u06FF]+", m1.group(1))
-                       if w not in STOP_WORDS and len(w) > 1]
-
-    part2_words = []
-    m2 = re.search(
-        r"اسم العميل.+?\n(.+?)(?=تاريخ|الرقم الضريبي|رقم السجل)",
+    m = re.search(
+        r"اسم العميل\s*[:\s]+(.+?)(?=الرقم الضريبي|رقم السجل|العنوان)",
         text, re.DOTALL
     )
-    if m2:
-        chunk = m2.group(1).split("\n")[0]
-        part2_words = [w for w in re.findall(r"[\u0600-\u06FF]+", chunk)
-                       if w not in STOP_WORDS and len(w) > 1]
-
-    all_words = part1_words + part2_words
+    if not m:
+        return ""
+    chunk = m.group(1)
+    chunk = re.sub(r"(?:قم الغاتورة|رقم الفاتورة)\s*\d+", "", chunk)
+    chunk = re.sub(r"\d{4,}", "", chunk)
+    chunk = re.sub(r"[a-zA-Z]{2,}", "", chunk)
+    stop = {"اسم","العميل","فاتورة","إلى","إلىة","التتجار",
+            "رقم","الفاتورة","تاريخ","الغاتورة","إلىة"}
+    arabic_words = [w for w in re.findall(r"[\u0600-\u06FF]+", chunk)
+                    if w not in stop and len(w) > 1]
     seen = set()
     unique = []
-    for w in all_words:
+    for w in arabic_words:
         if w not in seen:
             seen.add(w)
             unique.append(w)
@@ -141,48 +135,75 @@ def is_summary_row(vals):
     return any(kw in " ".join(vals) for kw in SUMMARY_KW)
 
 def extract_items_positional(word_df, text):
-    if word_df.empty:
-        return []
-    rows = reconstruct_table_rows(word_df)
-    if not rows:
-        return []
-    header_idx = None
-    for i, row in enumerate(rows):
-        if any(kw in row["text"] for kw in HEADER_KW):
-            header_idx = i
-            break
-    summary_idx = None
-    start = (header_idx + 1) if header_idx is not None else 0
-    for i, row in enumerate(rows[start:], start=start):
-        if any(kw in row["text"] for kw in SUMMARY_KW):
-            summary_idx = i
-            break
-    if header_idx is None or summary_idx is None:
-        return []
     items = []
-    for row in rows[header_idx + 1: summary_idx]:
-        t = row["text"].strip()
-        if not t or any(kw in t for kw in SUMMARY_KW):
-            continue
-        nums = [n for n in re.findall(r"[\d,]+\.?\d*", t)
-                if len(re.sub(r"[,.]","",n)) <= 8]
-        words_in_row = row["words"].sort_values("left", ascending=False)
-        arabic_blocks, english_blocks = [], []
-        for _, w in words_in_row.iterrows():
-            wt = str(w["text"]).strip()
-            if re.search(r"[\u0600-\u06FF]", wt):
-                arabic_blocks.append(wt)
-            elif re.search(r"[A-Za-z]", wt):
-                english_blocks.append(wt)
-        sku  = arabic_blocks[0] if arabic_blocks else ""
-        desc = " ".join(english_blocks) if english_blocks else " ".join(arabic_blocks[1:])
-        if len(nums) >= 2:
+
+    # ── Pass 1: positional word positions ────────────────────
+    if not word_df.empty:
+        rows = reconstruct_table_rows(word_df)
+        header_idx = None
+        for i, row in enumerate(rows):
+            if any(kw in row["text"] for kw in HEADER_KW):
+                header_idx = i
+                break
+        summary_idx = None
+        start = (header_idx + 1) if header_idx is not None else 0
+        for i, row in enumerate(rows[start:], start=start):
+            if any(kw in row["text"] for kw in SUMMARY_KW):
+                summary_idx = i
+                break
+        if header_idx is not None and summary_idx is not None:
+            for row in rows[header_idx + 1: summary_idx]:
+                t = row["text"].strip()
+                if not t or any(kw in t for kw in SUMMARY_KW):
+                    continue
+                nums = [n for n in re.findall(r"[\d,]+\.?\d*", t)
+                        if len(re.sub(r"[,.]","",n)) <= 8]
+                words_in_row = row["words"].sort_values("left", ascending=False)
+                arabic_blocks, english_blocks = [], []
+                for _, w in words_in_row.iterrows():
+                    wt = str(w["text"]).strip()
+                    if re.search(r"[\u0600-\u06FF]", wt):
+                        arabic_blocks.append(wt)
+                    elif re.search(r"[A-Za-z]", wt):
+                        english_blocks.append(wt)
+                sku  = arabic_blocks[0] if arabic_blocks else ""
+                desc = " ".join(english_blocks) if english_blocks else " ".join(arabic_blocks[1:])
+                if len(nums) >= 2:
+                    items.append({
+                        "SKU":         reshape(sku),
+                        "Description": desc,
+                        "Quantity":    clean_number(nums[-3]) if len(nums) >= 3 else clean_number(nums[0]),
+                        "Unit price":  clean_number(nums[-2]) if len(nums) >= 2 else None,
+                    })
+
+    # ── Pass 2: text line fallback ────────────────────────────
+    if not items:
+        lines = text.split("\n")
+        in_table = False
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if any(h in line for h in HEADER_KW):
+                in_table = True
+                continue
+            if in_table and any(kw in line for kw in ["المجموع","القيمة","الإجمالي","الإحمالي","مدفوع"]):
+                break
+            if not in_table:
+                continue
+            nums = [n for n in re.findall(r"[\d,]+\.?\d*", line)
+                    if len(re.sub(r"[,.]","",n)) <= 8]
+            if len(nums) < 2:
+                continue
+            english = " ".join(re.findall(r"[A-Za-z][A-Za-z\s]*", line)).strip()
+            arabic  = " ".join(re.findall(r"[\u0600-\u06FF]+", line)).strip()
             items.append({
-                "SKU":         reshape(sku),
-                "Description": desc,
-                "Quantity":    clean_number(nums[-3]) if len(nums) >= 3 else clean_number(nums[0]),
+                "SKU":         arabic,
+                "Description": english,
+                "Quantity":    clean_number(nums[-3]) if len(nums) >= 3 else None,
                 "Unit price":  clean_number(nums[-2]) if len(nums) >= 2 else None,
             })
+
     return items
 
 def extract_items_native(pdf_path):
@@ -281,6 +302,9 @@ def process_pdf(pdf_path):
         word_df = pd.DataFrame()
         cname   = extract_customer_name_text(text)
         items   = extract_items_native(pdf_path)
+        # fallback to text parsing if native table empty
+        if not items:
+            items = extract_items_positional(pd.DataFrame(), text)
 
     meta["Customer Name"] = cname
 
@@ -338,7 +362,7 @@ if uploaded_files:
                         data=raw_text,
                         file_name=f"{path.stem}_raw.txt",
                         mime="text/plain",
-                        key=f"raw_dl_{i}_{path.name}"
+                        key=f"raw_dl_{i}_{path.stem}"
                     )
 
             if not df.empty:
