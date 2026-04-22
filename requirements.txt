@@ -1,12 +1,11 @@
-streamlit
-PyMuPDF
-pdfplumber
-pandas
-openpyxl
-python-bidi
-arabic_reshaper
 
+
+streamlit
+pymupdf
+pdfplumber
 pytesseract
 Pillow
+pandas
 openpyxl
-
+arabic-reshaper
+python-bidi
