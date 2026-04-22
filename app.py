@@ -145,7 +145,6 @@ def is_summary_row(vals):
 def extract_items_positional(word_df, text):
     items = []
 
-    # Pass 1: positional
     if not word_df.empty:
         rows = reconstruct_table_rows(word_df)
         header_idx = None
@@ -184,7 +183,6 @@ def extract_items_positional(word_df, text):
                         "Unit price":  clean_number(nums[-2]) if len(nums) >= 2 else None,
                     })
 
-    # Pass 2: text line fallback
     if not items:
         lines = text.split("\n")
         in_table = False
@@ -313,7 +311,6 @@ def process_pdf(pdf_path):
         if not items:
             items = extract_items_positional(pd.DataFrame(), text)
 
-    # Fallback: use filename if OCR/regex gave incomplete name
     if not cname or len(cname) < 4:
         cname = extract_name_from_filename(pdf_path)
 
