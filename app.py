@@ -107,22 +107,6 @@ SUMMARY_KW = [
     "رقم السجل","العنوان","الجوال","السجل التجاري",
 ]
 
-# FIX 1: pack-size pattern to strip from SKU
-PACK_SIZE_PAT = re.compile(
-    r"\b\d+\s*ك\b"
-    r"|\(\s*\d+\s*\)"
-    r"|\b\d+\s*كجم\b"
-    r"|\b\d+\s*كغ\b"
-    r"|\b\d+\s*×\s*\d+\b",
-    re.UNICODE
-)
-
-def clean_sku(raw_sku):
-    cleaned = PACK_SIZE_PAT.sub(" ", raw_sku)
-    cleaned = re.sub(r"\b\d+\b", " ", cleaned)
-    words = [w for w in cleaned.split() if w not in UNIT_WORDS and len(w) > 1]
-    return " ".join(words).strip()
-
 def is_summary_row(vals):
     return any(kw in " ".join(vals) for kw in SUMMARY_KW)
 
@@ -149,14 +133,22 @@ def extract_customer_name_text(text):
             unique.append(w)
     return " ".join(unique).strip()
 
-# FIX 2: {3,} → {2,} for English words + clean_sku() applied to SKU
 def parse_item_line(line):
+    """
+    Smart parser that handles two OCR layouts:
+    Layout A (2445/2975): Arabic SKU | English Desc | qty | price | total
+    Layout B (2832):      Arabic SKU | qty | price | English Desc | total
+
+    Strategy: use English word positions to separate SKU numbers from data numbers.
+    - Numbers AFTER last English word → data (Layout A)
+    - If too few after English → use numbers BEFORE first English + after (Layout B)
+    """
     def get_nums(segment):
         return [n for n in re.findall(r"[\d,]+\.?\d*", segment)
                 if clean_number(n) not in (0, None)
                 and len(re.sub(r"[,.]","",n)) <= 8]
 
-    eng_matches = list(re.finditer(r"[A-Za-z]{2,}", line))  # FIX: was {3,}
+    eng_matches = list(re.finditer(r"[A-Za-z]{3,}", line))
 
     if eng_matches:
         first_eng_start = eng_matches[0].start()
@@ -165,9 +157,11 @@ def parse_item_line(line):
         after_nums  = get_nums(line[last_eng_end:])
         before_nums = get_nums(line[:first_eng_start])
 
+        # Layout A: enough data after English
         if len(after_nums) >= 2:
             data_nums = after_nums
         else:
+            # Layout B: data is before English, total is after
             data_nums = before_nums + after_nums
     else:
         data_nums = get_nums(line)
@@ -175,38 +169,43 @@ def parse_item_line(line):
     if len(data_nums) < 2:
         return None
 
+    # Last number = total (المجموع), candidates = price + qty
     candidates = data_nums[:-1]
 
+    # Unit price: number with decimal point
     unit_price = None
     for n in candidates:
         if "." in str(n):
             unit_price = clean_number(n)
             break
 
+    # Quantity: smallest whole number (العدد is count, smaller than weight)
     whole_nums = [clean_number(n) for n in candidates
                   if "." not in str(n)
                   and clean_number(n) and clean_number(n) != unit_price]
     qty = min(whole_nums) if whole_nums else None
 
+    # Fallback: no decimal found
     if unit_price is None:
         vals = sorted([clean_number(n) for n in candidates if clean_number(n)])
         if len(vals) >= 2:
-            qty        = vals[0]
-            unit_price = vals[-1]
+            qty        = vals[0]   # smallest = count
+            unit_price = vals[-1]  # largest  = price
         elif vals:
             unit_price = vals[0]
 
-    eng_words = re.findall(r"[A-Za-z]{2,}", line)  # FIX: was {3,}
+    # Description = English words (min 3 chars to skip noise like "pS")
+    eng_words = re.findall(r"[A-Za-z]{3,}", line)
     desc = " ".join(eng_words).strip()
 
+    # SKU = Arabic + product-name numbers/brackets, minus unit words
     sku_match = re.search(r"([\u0600-\u06FF][\u0600-\u06FF\s\d\(\)ك]+)", line)
     if sku_match:
         raw_sku = sku_match.group(1).strip()
-        sku = clean_sku(raw_sku)          # FIX: was inline filter
+        sku = " ".join(w for w in raw_sku.split() if w not in UNIT_WORDS).strip()
     else:
         ar_words = re.findall(r"[\u0600-\u06FF]{2,}", line)
-        raw_sku = " ".join(w for w in ar_words if w not in UNIT_WORDS)
-        sku = clean_sku(raw_sku)          # FIX: was inline filter
+        sku = " ".join(w for w in ar_words if w not in UNIT_WORDS).strip()
 
     if not (sku or desc):
         return None
@@ -221,6 +220,7 @@ def parse_item_line(line):
 def extract_items_positional(word_df, text):
     items = []
 
+    # ── Pass 1: positional word positions ────────────────────
     if not word_df.empty:
         rows = reconstruct_table_rows(word_df)
         header_idx = None
@@ -243,6 +243,7 @@ def extract_items_positional(word_df, text):
                 if parsed:
                     items.append(parsed)
 
+    # ── Pass 2: text line fallback (header found) ─────────────
     if not items:
         lines = text.split("\n")
         in_table = False
@@ -261,6 +262,7 @@ def extract_items_positional(word_df, text):
             if parsed:
                 items.append(parsed)
 
+    # ── Pass 3: headerless fallback ───────────────────────────
     if not items:
         for line in text.split("\n"):
             line = line.strip()
@@ -269,7 +271,7 @@ def extract_items_positional(word_df, text):
             if any(kw in line for kw in SUMMARY_KW + HEADER_KW):
                 continue
             has_arabic  = bool(re.search(r"[\u0600-\u06FF]{2,}", line))
-            has_english = bool(re.search(r"[A-Za-z]{2,}", line))  # FIX: was {3,}
+            has_english = bool(re.search(r"[A-Za-z]{3,}", line))
             has_nums    = len(re.findall(r"[\d,]+\.?\d*", line)) >= 2
             if not (has_arabic and has_english and has_nums):
                 continue
@@ -305,13 +307,12 @@ def extract_items_native(pdf_path):
                             "Unit price":  clean_number(vals[2]) if len(vals) > 2 else None,
                             "Quantity":    clean_number(vals[3]) if len(vals) > 3 else None,
                             "Description": raw_desc,
-                            "SKU":         clean_sku(" ".join(sku_words)),  # FIX: wrap with clean_sku
+                            "SKU":         " ".join(sku_words),
                         })
     except:
         pass
     return items
 
-# FIX 3: Paid fallback — if OCR garbles مدفوع, infer from zero balance
 def extract_metadata(pdf_path, text):
     def get_amount_clean(*keywords):
         for kw in keywords:
@@ -357,16 +358,8 @@ def extract_metadata(pdf_path, text):
     if not total_after and total_before and vat:
         total_after = round(total_before + vat, 2)
 
-    # Try direct read of Paid
     paid_m = re.search(r"مدفوع[^\d\n]*([\d,٬٫]+\.?\d*)", text)
-    paid   = clean_number(paid_m.group(1)) if paid_m else None
-
-    # FIX: if Paid unreadable, check الرصيد المستحق = 0 → Paid = total_after
-    if not paid:
-        balance_m = re.search(r"الرصيد[^\d\n]*([\d,٬٫]+\.?\d*)", text)
-        balance   = clean_number(balance_m.group(1)) if balance_m else None
-        if balance is not None and balance == 0 and total_after:
-            paid = total_after
+    paid = clean_number(paid_m.group(1)) if paid_m else None
 
     return {
         "Invoice Number":   inv_num,
@@ -488,7 +481,6 @@ if uploaded_files:
             )
         else:
             st.warning("⚠️ No data extracted.")
-            
 
 
 
