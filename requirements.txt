@@ -5,3 +5,7 @@ pandas
 openpyxl
 python-bidi
 arabic_reshaper
+
+pytesseract
+Pillow
+openpyxl
