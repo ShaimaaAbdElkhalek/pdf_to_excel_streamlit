@@ -1,5 +1,25 @@
-import re
+import streamlit as st
+import fitz
 import pandas as pd
+import re
+import tempfile
+import zipfile
+from pathlib import Path
+from io import BytesIO
+
+import pytesseract
+from pdf2image import convert_from_path
+
+# =========================
+# OCR
+# =========================
+
+def extract_text_ocr(pdf_path):
+    images = convert_from_path(pdf_path, dpi=300)
+    text = ""
+    for img in images:
+        text += pytesseract.image_to_string(img, lang='ara+eng') + "\n"
+    return text
 
 # =========================
 # CLEAN TEXT
@@ -11,40 +31,63 @@ def clean_text(text):
     return text
 
 # =========================
-# SMART PRODUCT EXTRACTION (REAL FIX)
+# FIX BROKEN OCR NUMBERS
+# =========================
+
+def fix_numbers(text):
+    # 58,584.42 or 58 584.42 → 58584.42
+    text = re.sub(r"(\d)\s+(\d{3}\.\d+)", r"\1\2", text)
+    return text
+
+# =========================
+# METADATA
+# =========================
+
+def extract_metadata(text, filename):
+
+    def find(key):
+        m = re.search(rf"{key}\s*[:\-]?\s*(.+)", text)
+        return m.group(1).strip() if m else ""
+
+    return {
+        "Invoice Number": find("رقم الفاتورة"),
+        "Invoice Date": find("تاريخ الفاتورة"),
+        "Customer Name": find("اسم العميل"),
+        "Tax Number": find("الرقم الضريبي"),
+        "Source File": filename
+    }
+
+# =========================
+# PRODUCT EXTRACTION (ROBUST)
 # =========================
 
 def extract_items(text):
 
     text = clean_text(text)
+    text = fix_numbers(text)
 
     rows = []
 
-    # 🔥 STEP 1: isolate product area
-    # (between "العدد" and "المجموع")
-    try:
-        product_block = re.search(r"العدد(.*?)المجموع", text).group(1)
-    except:
-        product_block = text
+    # isolate product section
+    match = re.search(r"العدد(.*?)المجموع", text)
+    product_block = match.group(1) if match else text
 
-    # 🔥 STEP 2: split using product name patterns
-    # products usually contain English words or capital letters
-    candidates = re.split(r"(?=[A-Z][A-Z\s]+)", product_block)
+    # split by capitalized product names OR Arabic+English mix
+    parts = re.split(r"(?=[A-Z][A-Z\s]{3,})", product_block)
 
-    for c in candidates:
+    for p in parts:
 
-        c = c.strip()
-        if len(c) < 10:
+        p = p.strip()
+        if len(p) < 10:
             continue
 
-        # extract all numbers
-        nums = re.findall(r"\d+\.\d+|\d+", c)
+        nums = re.findall(r"\d+\.\d+|\d+", p)
 
         if len(nums) < 2:
             continue
 
-        # extract description (remove numbers)
-        desc = re.sub(r"\d+\.\d+|\d+", "", c)
+        # remove numbers for description
+        desc = re.sub(r"\d+\.\d+|\d+", "", p)
         desc = re.sub(r"[^\w\s\u0600-\u06FF]", " ", desc)
         desc = re.sub(r"\s+", " ", desc).strip()
 
@@ -53,6 +96,10 @@ def extract_items(text):
 
         quantity = nums[-2]
         price = nums[-1]
+
+        # filter obvious totals
+        if "المجموع" in desc or "الإحمالي" in desc:
+            continue
 
         rows.append({
             "SKU / Description": desc,
@@ -63,16 +110,99 @@ def extract_items(text):
     return pd.DataFrame(rows)
 
 # =========================
-# TEST WITH YOUR TEXT
+# PROCESS PDF
 # =========================
 
-text = """
-شركة بداية ونهاية الجودة التجارية ...
-العدد سعر الوحدة الكمية المجموع
-58,584.42 كجم 69 18.00 200 BONE IN CUT 6 WAY عجل مقطع افيكو نيوزلاندي
-17,450 كجم 5 20.00 49 WHOLE LEG RUSTAM
-المجموع 76,034.42
-"""
+def process_pdf(pdf_path):
 
-df = extract_items(text)
-print(df)
+    text = ""
+
+    with fitz.open(pdf_path) as doc:
+        text = "\n".join([page.get_text() for page in doc])
+
+    if len(text.strip()) < 50:
+        text = extract_text_ocr(pdf_path)
+
+    meta = extract_metadata(text, pdf_path.name)
+    items = extract_items(text)
+
+    return text, meta, items
+
+# =========================
+# STREAMLIT UI
+# =========================
+
+st.set_page_config(page_title="Invoice Extractor Pro", layout="wide")
+st.title("📄 Invoice Extractor PRO (Final Stable Version)")
+
+files = st.file_uploader("Upload PDF / ZIP", type=["pdf", "zip"], accept_multiple_files=True)
+
+debug_data = {}
+
+if files:
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+
+        tmp = Path(tmp_dir)
+        pdfs = []
+
+        for f in files:
+            path = tmp / f.name
+            with open(path, "wb") as out:
+                out.write(f.read())
+
+            if f.name.endswith(".zip"):
+                with zipfile.ZipFile(path, "r") as z:
+                    z.extractall(tmp)
+                pdfs += list(tmp.glob("*.pdf"))
+            else:
+                pdfs.append(path)
+
+        all_data = []
+
+        for pdf in pdfs:
+
+            st.write(f"📄 Processing: {pdf.name}")
+
+            text, meta, items = process_pdf(pdf)
+
+            debug_data[pdf.name] = text
+
+            if not items.empty:
+                for k, v in meta.items():
+                    items[k] = v
+                all_data.append(items)
+
+        # =========================
+        # DEBUG VIEW
+        # =========================
+
+        with st.expander("🔍 Show Extracted Text (DEBUG)"):
+            for name, txt in debug_data.items():
+                st.subheader(name)
+                st.text_area("Raw Text", txt, height=300)
+
+        # =========================
+        # OUTPUT
+        # =========================
+
+        if all_data:
+
+            final_df = pd.concat(all_data, ignore_index=True)
+
+            st.success("✅ Extraction Successful")
+
+            st.dataframe(final_df)
+
+            buffer = BytesIO()
+            final_df.to_excel(buffer, index=False)
+            buffer.seek(0)
+
+            st.download_button(
+                "📥 Download Excel",
+                buffer,
+                file_name="invoices_clean.xlsx"
+            )
+
+        else:
+            st.error("❌ No products extracted — invoice format needs deeper layout parsing")
