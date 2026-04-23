@@ -1,5 +1,3 @@
-# streamlit_app.py
-
 import streamlit as st
 import fitz
 import pdfplumber
@@ -26,143 +24,101 @@ def extract_text_ocr(pdf_path):
     return text
 
 # =========================
-# TEXT NORMALIZATION
+# NORMALIZE TEXT
 # =========================
 
 def normalize_text(text):
-    fixes = {
-        "الغاتورة": "الفاتورة",
-        "اإلجمالي": "الإجمالي",
-        "الاجمالي": "الإجمالي",
-        "تارخ": "تاريخ",
-    }
-    for k, v in fixes.items():
-        text = text.replace(k, v)
-    return text
+    return text.replace("الغاتورة", "الفاتورة").replace("اإلجمالي", "الإجمالي")
 
 # =========================
-# FIND FIELD (FUZZY)
-# =========================
-
-def find_field(text, keywords):
-    if isinstance(keywords, str):
-        keywords = [keywords]
-
-    for key in keywords:
-        pattern = rf"{key}\s*[:\-]?\s*(.+)"
-        m = re.search(pattern, text)
-        if m:
-            return m.group(1).strip()
-    return ""
-
-# =========================
-# CLEAN NUMBERS
-# =========================
-
-def clean_number(x):
-    if pd.isna(x):
-        return None
-
-    x = str(x)
-    x = re.sub(r"[^\d.,]", "", x)
-    x = x.replace("٫", ".").replace("٬", "")
-
-    if len(x) > 15:
-        return None
-
-    if x.count(".") > 1:
-        parts = x.split(".")
-        x = parts[0] + "." + "".join(parts[1:])
-
-    try:
-        return float(x)
-    except:
-        return None
-
-# =========================
-# METADATA (FULL)
+# METADATA
 # =========================
 
 def extract_metadata(text, filename):
+    def find(k):
+        m = re.search(rf"{k}\s*[:\-]?\s*(.+)", text)
+        return m.group(1).strip() if m else ""
 
     return {
-        "Invoice Number": find_field(text, ["رقم الفاتورة","فاتورة رقم"]),
-        "Invoice Date": find_field(text, ["تاريخ الفاتورة","تاريخ"]),
-        "Customer Name": find_field(text, ["اسم العميل","العميل"]),
-        "VAT Number": find_field(text, ["الرقم الضريبي"]),
-        "CR Number": find_field(text, ["السجل التجاري"]),
-        "Phone": find_field(text, ["رقم الجوال"]),
-        "IBAN": find_field(text, ["الايبان"]),
-        "Address": find_field(text, ["العنوان"]),
-        "Paid": find_field(text, ["مدفوع"]),
-        "Balance": find_field(text, ["الإجمالي"]),
-        "Not Paid": find_field(text, ["الرصيد المستحق"]),
+        "Invoice Number": find("رقم الفاتورة"),
+        "Invoice Date": find("تاريخ الفاتورة"),
+        "Customer Name": find("اسم العميل"),
+        "Address": find("العنوان"),
+        "Paid": find("مدفوع"),
+        "Balance": find("الإجمالي"),
         "Source File": filename
     }
 
 # =========================
-# SMART OCR TABLE PARSER 🔥
+# 🔥 MAIN FIX: ONE SKU = ONE ROW
 # =========================
 
-def extract_table_from_ocr(text):
-
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
+def extract_items_from_text(text):
+    lines = text.split("\n")
     rows = []
+
+    current_invoice = {}
 
     for line in lines:
 
-        # detect product line
-        if any(c.isdigit() for c in line) and len(line) > 15:
+        # detect product line (contains numbers + text)
+        if re.search(r"\d", line) and len(line) > 10:
 
             nums = re.findall(r"\d+\.?\d*", line)
 
             if len(nums) >= 2:
+
+                quantity = nums[-2]
+                price = nums[-1]
+
+                # remove numbers to get description
+                desc = re.sub(r"\d+\.?\d*", "", line).strip()
+
                 rows.append({
-                    "Description": line,
-                    "Quantity": nums[-2],
-                    "Unit price": nums[-1]
+                    "Description": desc,
+                    "Quantity": quantity,
+                    "Unit price": price
                 })
 
     return pd.DataFrame(rows)
 
 # =========================
-# MAIN PROCESS
+# PROCESS PDF
 # =========================
 
 def process_pdf(pdf_path):
 
-    # try normal extraction
     with fitz.open(pdf_path) as doc:
         text = "\n".join([p.get_text() for p in doc])
 
-    # fallback OCR
     if len(text.strip()) < 50:
         text = extract_text_ocr(pdf_path)
 
     text = normalize_text(text)
 
-    metadata = extract_metadata(text, pdf_path.name)
+    meta = extract_metadata(text, pdf_path.name)
 
-    # table
-    df_table = extract_table_from_ocr(text)
+    items = extract_items_from_text(text)
 
-    if not df_table.empty:
-        for k, v in metadata.items():
-            df_table[k] = v
-        return df_table
+    # 🔥 CRITICAL: ONE ROW PER SKU + REPEAT META
+    if not items.empty:
+        for k, v in meta.items():
+            items[k] = v
+        return items
 
-    return pd.DataFrame([metadata])
+    return pd.DataFrame([meta])
 
 # =========================
-# STREAMLIT UI
+# STREAMLIT
 # =========================
 
 st.set_page_config(page_title="Invoice Extractor", layout="wide")
-st.title("📄 Smart Arabic Invoice Extractor")
+st.title("📄 Invoice Extractor (ONE SKU = ONE ROW)")
 
-files = st.file_uploader("Upload PDF or ZIP", type=["pdf","zip"], accept_multiple_files=True)
+files = st.file_uploader("Upload PDF / ZIP", type=["pdf","zip"], accept_multiple_files=True)
 
 if files:
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         pdfs = []
@@ -173,7 +129,7 @@ if files:
                 out.write(f.read())
 
             if f.name.endswith(".zip"):
-                with zipfile.ZipFile(path, 'r') as z:
+                with zipfile.ZipFile(path) as z:
                     z.extractall(tmp)
                 pdfs += list(tmp.glob("*.pdf"))
             else:
@@ -190,22 +146,21 @@ if files:
         if all_data:
             final_df = pd.concat(all_data, ignore_index=True)
 
-            # clean numbers
-            for col in ["Quantity","Unit price","Paid","Balance","Not Paid"]:
-                if col in final_df.columns:
-                    final_df[col] = final_df[col].apply(clean_number)
-
-            st.success("✅ Done")
+            st.success("✅ Done - One SKU per row")
             st.dataframe(final_df)
 
             buffer = BytesIO()
             final_df.to_excel(buffer, index=False)
             buffer.seek(0)
 
-            st.download_button("📥 Download Excel", buffer, "invoices.xlsx")
+            st.download_button(
+                "📥 Download Excel",
+                buffer,
+                "invoices.xlsx"
+            )
 
         else:
-            st.warning("⚠️ No data extracted")
+            st.warning("No data extracted")
 
 
 
