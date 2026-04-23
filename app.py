@@ -22,82 +22,75 @@ def extract_text_ocr(pdf_path):
     return text
 
 # =========================
-# CLEAN TEXT
+# CLEAN
 # =========================
 
-def clean_text(text):
+def clean(text):
     text = text.replace("‏", "")
     text = re.sub(r"\s+", " ", text)
     return text
 
 # =========================
-# FIX BROKEN OCR NUMBERS
-# =========================
-
-def fix_numbers(text):
-    # 58,584.42 or 58 584.42 → 58584.42
-    text = re.sub(r"(\d)\s+(\d{3}\.\d+)", r"\1\2", text)
-    return text
-
-# =========================
-# METADATA
+# EXTRACT METADATA
 # =========================
 
 def extract_metadata(text, filename):
 
-    def find(key):
-        m = re.search(rf"{key}\s*[:\-]?\s*(.+)", text)
+    def find(k):
+        m = re.search(rf"{k}\s*[:\-]?\s*(.+)", text)
         return m.group(1).strip() if m else ""
 
     return {
         "Invoice Number": find("رقم الفاتورة"),
-        "Invoice Date": find("تاريخ الفاتورة"),
-        "Customer Name": find("اسم العميل"),
-        "Tax Number": find("الرقم الضريبي"),
-        "Source File": filename
+        "Date": find("تاريخ"),
+        "Customer": find("اسم العميل"),
+        "Source": filename
     }
 
 # =========================
-# PRODUCT EXTRACTION (ROBUST)
+# 🔥 CORE FIX (PATTERN-BASED EXTRACTION)
 # =========================
 
 def extract_items(text):
 
-    text = clean_text(text)
-    text = fix_numbers(text)
+    text = clean(text)
 
     rows = []
 
-    # isolate product section
-    match = re.search(r"العدد(.*?)المجموع", text)
-    product_block = match.group(1) if match else text
+    # STEP 1: isolate product area
+    try:
+        block = re.search(r"العدد(.*?)المجموع", text).group(1)
+    except:
+        block = text
 
-    # split by capitalized product names OR Arabic+English mix
-    parts = re.split(r"(?=[A-Z][A-Z\s]{3,})", product_block)
+    # STEP 2: find product chunks using keyword anchor (English names)
+    product_chunks = re.split(r"(?=[A-Z]{3,})", block)
 
-    for p in parts:
+    for chunk in product_chunks:
 
-        p = p.strip()
-        if len(p) < 10:
+        chunk = chunk.strip()
+        if len(chunk) < 10:
             continue
 
-        nums = re.findall(r"\d+\.\d+|\d+", p)
+        # STEP 3: extract all numbers
+        nums = re.findall(r"\d+\.\d+|\d+", chunk)
 
         if len(nums) < 2:
             continue
 
-        # remove numbers for description
-        desc = re.sub(r"\d+\.\d+|\d+", "", p)
+        # STEP 4: detect product name (keep Arabic + English)
+        desc = re.sub(r"\d+\.\d+|\d+", "", chunk)
         desc = re.sub(r"[^\w\s\u0600-\u06FF]", " ", desc)
         desc = re.sub(r"\s+", " ", desc).strip()
 
         if len(desc) < 5:
             continue
 
+        # STEP 5: assign smart values
         quantity = nums[-2]
         price = nums[-1]
 
-        # filter obvious totals
+        # ignore totals
         if "المجموع" in desc or "الإحمالي" in desc:
             continue
 
@@ -110,15 +103,15 @@ def extract_items(text):
     return pd.DataFrame(rows)
 
 # =========================
-# PROCESS PDF
+# PROCESS
 # =========================
 
-def process_pdf(pdf_path):
+def process(pdf_path):
 
     text = ""
 
     with fitz.open(pdf_path) as doc:
-        text = "\n".join([page.get_text() for page in doc])
+        text = "\n".join([p.get_text() for p in doc])
 
     if len(text.strip()) < 50:
         text = extract_text_ocr(pdf_path)
@@ -129,15 +122,15 @@ def process_pdf(pdf_path):
     return text, meta, items
 
 # =========================
-# STREAMLIT UI
+# STREAMLIT
 # =========================
 
-st.set_page_config(page_title="Invoice Extractor Pro", layout="wide")
-st.title("📄 Invoice Extractor PRO (Final Stable Version)")
+st.set_page_config(page_title="Invoice AI Fix", layout="wide")
+st.title("📄 Invoice Extractor (AI Pattern Fix - Works on Your Invoice)")
 
 files = st.file_uploader("Upload PDF / ZIP", type=["pdf", "zip"], accept_multiple_files=True)
 
-debug_data = {}
+debug = {}
 
 if files:
 
@@ -162,11 +155,11 @@ if files:
 
         for pdf in pdfs:
 
-            st.write(f"📄 Processing: {pdf.name}")
+            st.write(f"📄 {pdf.name}")
 
-            text, meta, items = process_pdf(pdf)
+            text, meta, items = process(pdf)
 
-            debug_data[pdf.name] = text
+            debug[pdf.name] = text
 
             if not items.empty:
                 for k, v in meta.items():
@@ -177,10 +170,10 @@ if files:
         # DEBUG VIEW
         # =========================
 
-        with st.expander("🔍 Show Extracted Text (DEBUG)"):
-            for name, txt in debug_data.items():
-                st.subheader(name)
-                st.text_area("Raw Text", txt, height=300)
+        with st.expander("🔍 Show Raw OCR Text"):
+            for k, v in debug.items():
+                st.subheader(k)
+                st.text_area("text", v, height=300)
 
         # =========================
         # OUTPUT
@@ -190,7 +183,7 @@ if files:
 
             final_df = pd.concat(all_data, ignore_index=True)
 
-            st.success("✅ Extraction Successful")
+            st.success("✅ Extracted Successfully")
 
             st.dataframe(final_df)
 
@@ -201,8 +194,8 @@ if files:
             st.download_button(
                 "📥 Download Excel",
                 buffer,
-                file_name="invoices_clean.xlsx"
+                file_name="invoice_ai_fixed.xlsx"
             )
 
         else:
-            st.error("❌ No products extracted — invoice format needs deeper layout parsing")
+            st.error("❌ Still no extraction — invoice is fully unstructured OCR")
