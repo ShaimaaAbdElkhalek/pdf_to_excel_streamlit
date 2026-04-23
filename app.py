@@ -1,95 +1,40 @@
-import asyncio
+import streamlit as st
+import fitz
+import pdfplumber
+import pandas as pd
 import re
 import tempfile
-import unicodedata
 import zipfile
-from io import BytesIO
 from pathlib import Path
-
-import fitz
-import pandas as pd
-import pdfplumber
-import streamlit as st
+from io import BytesIO
 from PIL import Image
+import pytesseract
+import arabic_reshaper
+from bidi.algorithm import get_display
 
-try:
-    import arabic_reshaper
-    from bidi.algorithm import get_display
 
-    def reshape(text):
-        try:
-            return get_display(arabic_reshaper.reshape(text))
-        except Exception:
-            return text
-except ImportError:
-    def reshape(text):
+def reshape(text):
+    try:
+        return get_display(arabic_reshaper.reshape(text))
+    except:
         return text
 
-
-# ---------------------------------------------------------------------------
-# Arabic normalization
-# ---------------------------------------------------------------------------
-
-def normalize_arabic(text: str) -> str:
-    """Convert Arabic presentation forms (FExxx) to standard codepoints."""
-    return unicodedata.normalize("NFKC", text)
-
-
-def fix_ocr_numbers(text: str) -> str:
-    """Fix common OCR artifacts in numeric contexts (I→1, O→0, l→1)."""
-    # Replace capital I/O only when surrounded by digits or at start of digit run
-    text = re.sub(r"(?<!\w)([IO])(\d)", lambda m: ("1" if m.group(1) == "I" else "0") + m.group(2), text)
-    text = re.sub(r"(\d)([IO])(?!\w)", lambda m: m.group(1) + ("1" if m.group(2) == "I" else "0"), text)
-    return text
-
-
-# ---------------------------------------------------------------------------
-# Windows OCR (winocr) — replaces pytesseract
-# ---------------------------------------------------------------------------
-
-async def _winocr_async(img: Image.Image):
-    import winocr
-    return await winocr.recognize_pil(img, "ar")
-
-
-def run_winocr(img: Image.Image):
-    """Synchronous wrapper; safe whether or not an event loop is already running."""
-    try:
-        # No running loop → standard path
-        asyncio.get_running_loop()
-        # A loop IS running (e.g. Streamlit) → run in a fresh thread
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            future = ex.submit(asyncio.run, _winocr_async(img))
-            return future.result(timeout=60)
-    except RuntimeError:
-        # No running loop
-        return asyncio.run(_winocr_async(img))
-
-
-def pdf_page_to_image(pdf_path, page_index: int = 0, scale: float = 3.0) -> Image.Image:
-    with fitz.open(str(pdf_path)) as doc:
-        pix = doc[page_index].get_pixmap(matrix=fitz.Matrix(scale, scale))
-    return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def clean_number(val):
     s = re.sub(r"[^\d.]", "", str(val).replace(",", "").replace("\u066c", "").replace("\u066b", "."))
     try:
         return float(s) if s else None
-    except Exception:
+    except:
         return None
 
 
-def extract_name_from_filename(pdf_path) -> str:
+def extract_name_from_filename(pdf_path):
     stem = Path(pdf_path).stem
     name = re.sub(r"[-_\s]*\d+[-_\s]*$", "", stem).strip()
     name = re.sub(r"^[-_\s]*\d+[-_\s]*", "", name).strip()
-    return name if re.search(r"[\u0600-\u06FF]", name) else ""
+    if re.search(r"[\u0600-\u06FF]", name):
+        return name
+    return ""
 
 
 UNIT_WORDS = {
@@ -98,44 +43,29 @@ UNIT_WORDS = {
     "\u0637\u0646", "\u0643\u062c\u0645", "\u0644\u062a\u0631", "\u0643\u063a",
     "\u062c\u0631\u0627\u0645", "\u0645\u0644", "\u062d\u0628\u0629",
     "\u0631\u0648\u0644", "\u0628\u0627\u0643\u064a\u062a", "\u0635\u0646\u062f\u0648\u0642",
-    "\u0643\u0631\u0646\u0648\u0646\u0629",  # extra OCR variant كرنونة
 }
 
-# Keywords that mark the table header row
 HEADER_KW = [
     "\u0627\u0644\u0628\u0646\u062f", "\u0627\u0644\u0648\u0635\u0641",
     "\u0627\u0644\u0639\u062f\u062f", "\u0633\u0639\u0631 \u0627\u0644\u0648\u062d\u062f\u0629",
     "\u0627\u0644\u0643\u0645\u064a\u0629", "\u0627\u0644\u0648\u062d\u062f\u0629",
-    "\u0627\u0644\u0648\u0635\u0641",  # الوصف
 ]
 
-# Keywords that mark the financial summary section
 SUMMARY_KW = [
-    "\u0627\u0644\u0645\u062c\u0645\u0648\u0639",  # المجموع
-    "\u0645\u062f\u0641\u0648\u0639",              # مدفوع
-    "\u0645\u062f\u0647\u0648\u0639",              # مدهوع (OCR variant)
-    "\u0627\u0644\u0631\u0635\u064a\u062f",        # الرصيد
-    "\u0627\u0644\u0642\u064a\u0645\u0629",        # القيمة
-    "\u0627\u0644\u0642\u064a\u0645\u0647",
-    "\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a", # الإجمالي
-    "\u0627\u0644\u0625\u062d\u0645\u0627\u0644\u064a",
+    "\u0627\u0644\u0645\u062c\u0645\u0648\u0639", "\u0645\u062f\u0641\u0648\u0639",
+    "\u0627\u0644\u0631\u0635\u064a\u062f", "\u0627\u0644\u0642\u064a\u0645\u0629",
+    "\u0627\u0644\u0642\u064a\u0645\u0647", "\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a",
+    "\u0627\u0644\u0625\u062d\u0645\u0627\u0644\u064a", "\u0627\u0625\u0644\u062c\u0645\u0627\u0644\u064a",
     "\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a",
     "\u0631\u0642\u0645 \u0627\u0644\u062d\u0633\u0627\u0628",
-    "\u0627\u0644\u0627\u064a\u0628\u0627\u0646", "IBAN", "SA08",
-    "\u0627\u0644\u0645\u0645\u0644\u0643\u0629", "Kingdome",
+    "\u0627\u0644\u0627\u064a\u0628\u0627\u0646", "IBAN", "SA08", "Kingdome",
+    "\u0627\u0644\u0645\u0645\u0644\u0643\u0629",
     "\u0631\u0642\u0645 \u0627\u0644\u0641\u0627\u062a\u0648\u0631\u0629",
     "\u062a\u0627\u0631\u064a\u062e", "\u0627\u0633\u0645 \u0627\u0644\u0639\u0645\u064a\u0644",
     "\u0627\u0644\u0631\u0642\u0645 \u0627\u0644\u0636\u0631\u064a\u0628\u064a",
-    "\u0631\u0642\u0645 \u0627\u0644\u0633\u062c\u0644",
-    "\u0627\u0644\u0633\u062c\u0644 \u0627\u0644\u062a\u062c\u0627\u0631\u064a",
+    "\u0631\u0642\u0645 \u0627\u0644\u0633\u062c\u0644", "\u0627\u0644\u0639\u0646\u0648\u0627\u0646",
+    "\u0627\u0644\u062c\u0648\u0627\u0644", "\u0627\u0644\u0633\u062c\u0644 \u0627\u0644\u062a\u062c\u0627\u0631\u064a",
     "\u0645\u0631\u062a\u062c\u0639",
-    # OCR-garbled variants
-    "\u0627\u0644\u0645\u062d\u0645\u0648\u062c",  # المحموج (garbled المجموع)
-    "\u0627\u0644\u0645\u062d\u0645\u0648\u0639",  # المحموع (OCR variant)
-    "\u0627\u0644\u0635\u0627\u062d\u0647",        # المصاحه (garbled)
-    "\u0627\u0644\u0645\u0645\u0647",              # الممه (garbled)
-    "\u0627\u0644\u0625\u062d\u0645\u0627\u0644\u064a",
-    "\u0645\u0631\u062a\u062d\u0639",              # مرتحع (OCR variant)
 ]
 
 FINAL_COLS = [
@@ -155,139 +85,116 @@ SKU_TO_DESC = {
 }
 
 
-def clean_sku(raw_sku: str) -> str:
+def clean_sku(raw_sku):
     cleaned = re.sub(r"\|", " ", raw_sku)
     words = [w for w in cleaned.split()
              if w not in UNIT_WORDS and (len(w) > 1 or w == "\u0643")]
     return " ".join(words).strip()
 
 
-def extract_sku_from_line(line: str) -> str:
-    ar_block = re.search(r"([\u0600-\u06FF][\u0600-\u06FF\s\d()\u0643]*)", line)
+def extract_sku_from_line(line):
+    ar_block = re.search(r"([\u0600-\u06FF][\u0600-\u06FF\s\d\(\)\u0643]*)", line)
     raw = ar_block.group(1).strip() if ar_block else ""
     if not raw:
         ar_words = re.findall(r"[\u0600-\u06FF]{2,}", line)
         raw = " ".join(w for w in ar_words if w not in UNIT_WORDS)
-    for b in re.finditer(r"\(\s*\d+\s*\)", line):
-        b_clean = "(" + re.search(r"\d+", b.group()).group() + ")"
+    for b in re.findall(r"\(\s*\d+\s*\)", line):
+        b_clean = "(" + re.search(r"\d+", b).group() + ")"
         if b_clean not in raw.replace(" ", ""):
             raw = raw + " " + b_clean
     return clean_sku(raw)
 
 
-# ---------------------------------------------------------------------------
-# Text extraction
-# ---------------------------------------------------------------------------
-
 def get_text(pdf_path):
-    """Return (text, mode) where mode is 'native' or 'ocr'."""
-    with fitz.open(str(pdf_path)) as doc:
-        raw = "\n".join(page.get_text() for page in doc).strip()
-
-    if raw:
-        raw = normalize_arabic(raw)
-        raw = fix_ocr_numbers(raw)
-
-    if len(raw) > 50:
-        return raw, "native"
-
-    # Image-based PDF — use Windows OCR
+    with fitz.open(pdf_path) as doc:
+        text = "\n".join(page.get_text() for page in doc).strip()
+    if len(text) > 50:
+        return text, "native"
     try:
-        img = pdf_page_to_image(pdf_path, scale=3.0)
-        result = run_winocr(img)
-        lines = [" ".join(w.text for w in line.words) for line in result.lines]
-        text = fix_ocr_numbers("\n".join(lines))
-        return text, "ocr"
+        from pdf2image import convert_from_path
+        images = convert_from_path(str(pdf_path))
+        ocr_text = ""
+        for i, image in enumerate(images):
+            page_text = pytesseract.image_to_string(image, lang="ara+eng")
+            ocr_text += f"\n--- \u0627\u0644\u0635\u0641\u062d\u0629 {i+1} ---\n{page_text}\n"
+        return ocr_text, "ocr"
     except Exception:
-        return "", "ocr"
+        pass
+    ocr_text = ""
+    with fitz.open(pdf_path) as doc:
+        for page in doc:
+            pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            ocr_text += pytesseract.image_to_string(img, lang="ara+eng", config="--psm 6") + "\n"
+    return ocr_text, "ocr"
 
 
-def get_ocr_words(pdf_path) -> pd.DataFrame:
-    """Return DataFrame of words with bounding boxes from Windows OCR."""
+def get_ocr_words(pdf_path):
     try:
-        img = pdf_page_to_image(pdf_path, scale=3.0)
-        result = run_winocr(img)
-        rows = []
-        for line in result.lines:
-            for word in line.words:
-                r = word.bounding_rect
-                rows.append({
-                    "left": r.x,
-                    "top": r.y,
-                    "width": r.width,
-                    "height": r.height,
-                    "text": fix_ocr_numbers(word.text),
-                    "conf": 90,
-                })
-        return pd.DataFrame(rows)
+        from pdf2image import convert_from_path
+        images = convert_from_path(str(pdf_path))
+        img = images[0]
     except Exception:
-        return pd.DataFrame()
+        with fitz.open(pdf_path) as doc:
+            pix = doc[0].get_pixmap(matrix=fitz.Matrix(3, 3))
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    data = pytesseract.image_to_data(
+        img, lang="ara+eng", config="--psm 6",
+        output_type=pytesseract.Output.DATAFRAME,
+    )
+    data = data[data["conf"] > 30].dropna(subset=["text"])
+    data = data[data["text"].str.strip() != ""]
+    return data
 
 
-# ---------------------------------------------------------------------------
-# Table row reconstruction
-# ---------------------------------------------------------------------------
-
-def reconstruct_table_rows(word_df: pd.DataFrame, y_tolerance: int = 15):
+def reconstruct_table_rows(word_df, y_tolerance=15):
     if word_df.empty:
         return []
     word_df = word_df.copy()
     word_df["mid_y"] = word_df["top"] + word_df["height"] / 2
     rows = []
-    used: set = set()
+    used = set()
     for idx, word in word_df.iterrows():
         if idx in used:
             continue
         y = word["mid_y"]
         same_row = word_df[abs(word_df["mid_y"] - y) <= y_tolerance]
         used.update(same_row.index)
-        # Sort left-to-right so English words inside Arabic lines keep correct order
-        same_row = same_row.sort_values("left", ascending=True)
+        same_row = same_row.sort_values("left", ascending=False)
         row_text = " ".join(same_row["text"].astype(str).tolist())
         rows.append({"y": y, "text": row_text, "words": same_row})
     rows.sort(key=lambda r: r["y"])
     return rows
 
 
-# ---------------------------------------------------------------------------
-# Customer name extraction
-# ---------------------------------------------------------------------------
-
-def extract_customer_name_text(text: str) -> str:
-    """Extract customer name from invoice text."""
-    # Pattern handles both standard Arabic and OCR-garbled variants
+def extract_customer_name_text(text):
     m = re.search(
-        r"(?:\u0627\u0633\u0645|\u0627\u0633\u0645\u0647)"   # اسم / اسمه
-        r"[\s\n]*"
-        r"(?:\u0627\u0644\u0639\u0645\u064a\u0644|\u0627\u0644\u0639\u0645\u0628\u0644)"  # العميل / العمبل
-        r"[\s\n:]*(.+?)(?=\n|:|\u0627\u0644\u0631\u0642\u0645|\u0627\u0644\u0636\u0631\u064a)",
+        r"\u0627\u0633\u0645 \u0627\u0644\u0639\u0645\u064a\u0644\s*[:\s]+(.+?)"
+        r"(?=\u0627\u0644\u0631\u0642\u0645 \u0627\u0644\u0636\u0631\u064a\u0628\u064a"
+        r"|\u0631\u0642\u0645 \u0627\u0644\u0633\u062c\u0644|\u0627\u0644\u0639\u0646\u0648\u0627\u0646)",
         text, re.DOTALL,
     )
     if not m:
         return ""
-    chunk = m.group(1).strip()
+    chunk = m.group(1)
+    chunk = re.sub(r"(?:\u0642\u0645 \u0627\u0644\u063a\u0627\u062a\u0648\u0631\u0629|\u0631\u0642\u0645 \u0627\u0644\u0641\u0627\u062a\u0648\u0631\u0629)\s*\d+", "", chunk)
     chunk = re.sub(r"\d{4,}", "", chunk)
-    stop = {
-        "\u0627\u0633\u0645", "\u0627\u0644\u0639\u0645\u064a\u0644",
-        "\u0641\u0627\u062a\u0648\u0631\u0629", "\u0625\u0644\u0649",
-        "\u0631\u0642\u0645", "\u062a\u0627\u0631\u064a\u062e",
-    }
-    ar_words = [w for w in re.findall(r"[\u0600-\u06FF]+", chunk)
-                if w not in stop and len(w) > 1]
-    seen: set = set()
+    chunk = re.sub(r"[a-zA-Z]{2,}", "", chunk)
+    stop = {"\u0627\u0633\u0645", "\u0627\u0644\u0639\u0645\u064a\u0644", "\u0641\u0627\u062a\u0648\u0631\u0629",
+            "\u0625\u0644\u0649", "\u0625\u0644\u0649\u0629", "\u0627\u0644\u062a\u062a\u062c\u0627\u0631",
+            "\u0631\u0642\u0645", "\u0627\u0644\u0641\u0627\u062a\u0648\u0631\u0629",
+            "\u062a\u0627\u0631\u064a\u062e", "\u0627\u0644\u063a\u0627\u062a\u0648\u0631\u0629", "\u0625\u0644\u0649\u0629"}
+    arabic_words = [w for w in re.findall(r"[\u0600-\u06FF]+", chunk) if w not in stop and len(w) > 1]
+    seen = set()
     unique = []
-    for w in ar_words:
+    for w in arabic_words:
         if w not in seen:
             seen.add(w)
             unique.append(w)
     return " ".join(unique).strip()
 
 
-# ---------------------------------------------------------------------------
-# Item parsing
-# ---------------------------------------------------------------------------
-
-def get_nums(segment: str):
+def get_nums(segment):
     return [
         n for n in re.findall(r"[\d,]+\.?\d*", segment)
         if clean_number(n) not in (0, None)
@@ -295,113 +202,104 @@ def get_nums(segment: str):
     ]
 
 
-def parse_item_line(line: str):
+def parse_item_line(line):
     """
-    Extract SKU, Description, Quantity, Unit price from one invoice line.
+    Extracts SKU, Description, Quantity, Unit price from one invoice product line.
 
-    Strategy: find the (qty, price, total) triple where qty*price ≈ total.
-    Numbers may appear before or after the English product code, so we search
-    ALL numbers on the line. Original string form is used to detect whether a
-    number was written with a decimal point (e.g. "18.00" = price-like vs
-    "200" = qty-like).
+    Number routing:
+      Layout A (numbers after last English word):  after_nums >= 2 → use after_nums
+      Layout B (numbers between English words):     middle_nums >= 1 → middle + after
+      Fallback:                                     before + after
+
+    Price / Qty assignment (column-order first, then cross-check):
+      Step 1: first_whole=qty_candidate, first_decimal=price_candidate
+              If first_whole * first_decimal ≈ row_total → accept (handles most cases)
+      Step 2: If step 1 fails, find ANY (v1,v2) pair where v1*v2 ≈ row_total
+              Use position order: earlier candidate = qty, later = price
+      Step 3: Fallback: first whole = qty, first decimal = price
+
+    Description: collect all English words ≥ 4 chars from entire line (reduces noise)
+    SKU: Arabic block + any (NNN) bracket appended if missing from Arabic zone
     """
-    # Exclude pack-count bracket contents like (510) and unit-adjacent numbers
-    pack_bracket: set = set()
+    eng_matches = list(re.finditer(r"[A-Za-z]{2,}", line))
+
+    if eng_matches:
+        first_start = eng_matches[0].start()
+        last_end    = eng_matches[-1].end()
+        before_nums = get_nums(line[:first_start])
+        middle_nums = get_nums(line[first_start:last_end])
+        after_nums  = get_nums(line[last_end:])
+
+        if len(after_nums) >= 2:
+            all_nums = after_nums
+        elif len(middle_nums) >= 1:
+            all_nums = middle_nums + after_nums
+        else:
+            all_nums = before_nums + after_nums
+    else:
+        all_nums = get_nums(line)
+
+    if len(all_nums) < 2:
+        return None
+
+    # Strip pack-count brackets like (510)
+    pack_bracket = set()
     for m in re.finditer(r"\(\s*(\d+)\s*\)", line):
         pack_bracket.add(m.group(1))
 
-    unit_adjacent: set = set()
-    # Digit directly followed by Arabic unit (no space required — Arabic is non-ASCII so no \b issues)
-    for m in re.finditer(r"(\d+)\s*(?:كجم|كغ|قطع|قطعة)", line):
-        unit_adjacent.add(m.group(1))
-    # Standalone ك preceded by a digit and followed by space/end (e.g. "18 ك")
-    for m in re.finditer(r"(\d+)\s+ك(?:\s|$)", line):
-        unit_adjacent.add(m.group(1))
+    if len(all_nums) == 2:
+        candidates = [n for n in all_nums if n not in pack_bracket]
+        row_total = None
+    else:
+        candidates = [n for n in all_nums[:-1] if n not in pack_bracket]
+        rt = clean_number(all_nums[-1])
+        row_total = rt if rt and rt > 100 else None
 
-    all_raw = get_nums(line)
-    cand_pairs = [
-        (n, clean_number(n))
-        for n in all_raw
-        if n not in pack_bracket and n not in unit_adjacent and clean_number(n)
-    ]
-
-    if len(cand_pairs) < 2:
+    if not candidates:
         return None
 
-    # Numbers whose original string has an explicit decimal point → price-like
-    def has_decimal(n_str: str) -> bool:
-        return "." in n_str
+    # Column-order: first whole = qty, first decimal = price
+    first_whole   = next((clean_number(n) for n in candidates if "." not in str(n) and clean_number(n)), None)
+    first_decimal = next((clean_number(n) for n in candidates if "." in     str(n)), None)
 
-    cand_vals = [v for _, v in cand_pairs]
+    qty = first_whole
+    unit_price = first_decimal
 
-    row_total = None
-    qty = None
-    unit_price = None
+    # Validate against row total
+    if row_total and qty and unit_price:
+        if abs(qty * unit_price - row_total) / row_total > 0.05:
+            # Column-order doesn't match — search for matching pair
+            cand_vals = [clean_number(n) for n in candidates if clean_number(n)]
+            best_diff = float("inf")
+            found = False
+            for i, v1 in enumerate(cand_vals):
+                for j, v2 in enumerate(cand_vals):
+                    if i == j:
+                        continue
+                    if row_total > 0 and abs(v1 * v2 - row_total) / row_total < 0.05:
+                        diff = abs(v1 * v2 - row_total)
+                        if diff < best_diff:
+                            best_diff = diff
+                            # Earlier position = qty, later = price
+                            if i < j:
+                                qty, unit_price = v1, v2
+                            else:
+                                qty, unit_price = v2, v1
+                            found = True
+            # If still no match, keep column-order defaults
 
-    # Step 1: find triple (t, q, p) where q * p ≈ t (within 5%)
-    unique_vals = sorted(set(cand_vals), reverse=True)
-    for total_cand in unique_vals:
-        if total_cand < 200:
-            continue
-        rest_pairs = [(s, v) for s, v in cand_pairs if v != total_cand or cand_vals.count(v) > 1]
-        # Remove one occurrence of total_cand
-        tc_removed = False
-        rest_filtered = []
-        for s, v in cand_pairs:
-            if v == total_cand and not tc_removed:
-                tc_removed = True
-                continue
-            rest_filtered.append((s, v))
-
-        best_err = 0.05
-        for i, (s1, v1) in enumerate(rest_filtered):
-            for s2, v2 in rest_filtered[i:]:
-                if v1 == 0 or v2 == 0:
-                    continue
-                err = abs(v1 * v2 - total_cand) / total_cand
-                if err < best_err:
-                    best_err = err
-                    row_total = total_cand
-                    # Written-decimal → price-like, no decimal → qty-like
-                    if has_decimal(s1) and not has_decimal(s2):
-                        qty, unit_price = v2, v1
-                    elif has_decimal(s2) and not has_decimal(s1):
-                        qty, unit_price = v1, v2
-                    elif not has_decimal(s1) and not has_decimal(s2):
-                        qty, unit_price = min(v1, v2), max(v1, v2)
-                    else:
-                        qty, unit_price = v1, v2
-        if row_total is not None:
-            break
-
-    # Step 2: fallback — no matching triple; prefer explicit-decimal as price
-    if qty is None or unit_price is None:
-        qty_like = [(s, v) for s, v in cand_pairs if not has_decimal(s)]
-        price_like = [(s, v) for s, v in cand_pairs if has_decimal(s)]
-        if qty_like and price_like:
-            qty = min(v for _, v in qty_like)
-            unit_price = min(v for _, v in price_like)
-        elif len(cand_pairs) >= 2:
-            vals = sorted(v for _, v in cand_pairs)
+    # Final fallback: no decimal found
+    if unit_price is None:
+        vals = sorted([clean_number(n) for n in candidates if clean_number(n)])
+        if len(vals) >= 2:
             qty = vals[0]
             unit_price = vals[-1]
+        elif vals:
+            unit_price = vals[0]
 
-    # Step 3: infer qty from total/price if still missing
-    if row_total and unit_price and (qty is None or qty == unit_price):
-        computed = round(row_total / unit_price)
-        if computed > 0 and abs(computed * unit_price - row_total) / row_total < 0.05:
-            qty = computed
-
-    # Step 4: if price looks like a weight/count (< 50 SAR) and qty is far larger,
-    # they are likely swapped (e.g. 12.2 kg at 2850 SAR/kg)
-    if qty is not None and unit_price is not None:
-        if unit_price < 50 and qty > unit_price * 30:
-            qty, unit_price = unit_price, qty
-
-    # Description: collect English tokens including alphanumeric codes (e.g. BONEINCUT6WAY)
-    # Pattern: sequence starting and ending with a letter, may contain digits in middle
-    all_eng = re.findall(r"[A-Za-z][A-Za-z\d]*[A-Za-z]|[A-Za-z]{2,}", line)
-    desc_words = [w for w in all_eng if len(w) >= 3 or w.isupper()]
+    # Description: English words ≥ 4 chars (reduces short OCR noise like 'ghd', 'pxS')
+    all_eng = re.findall(r"[A-Za-z]{2,}", line)
+    desc_words = [w for w in all_eng if len(w) >= 4 or w.isupper()]
     seen_w: set = set()
     deduped = []
     for w in desc_words:
@@ -411,8 +309,10 @@ def parse_item_line(line: str):
             deduped.append(w)
     desc = " ".join(deduped).strip()
 
+    # SKU
     sku = extract_sku_from_line(line)
 
+    # Description fallback via SKU lookup
     if sku and desc:
         for ar_key, en_val in SKU_TO_DESC.items():
             if ar_key in sku:
@@ -432,66 +332,7 @@ def parse_item_line(line: str):
     return {"SKU": sku, "Description": desc, "Quantity": qty, "Unit price": unit_price}
 
 
-# ---------------------------------------------------------------------------
-# Item extraction strategies
-# ---------------------------------------------------------------------------
-
-def _is_summary_with_number(line: str) -> bool:
-    """True only when a summary keyword AND a number appear on the same line.
-    A lone keyword without a number is just a column header, not the summary."""
-    has_kw = any(kw in line for kw in SUMMARY_KW)
-    has_num = bool(re.search(r"\d{3,}", line))
-    return has_kw and has_num
-
-
-def extract_items_multiline(text: str):
-    """
-    Extract items from native PDFs where each product spans multiple lines.
-    Finds the table section, removes pipe separators, groups lines by product,
-    then parses each group as a combined item block.
-    """
-    lines = text.split("\n")
-    in_table = False
-    table_lines = []
-    for line in lines:
-        if any(h in line for h in HEADER_KW):
-            in_table = True
-            continue
-        # Only treat as summary if keyword co-occurs with a number on the same line
-        if in_table and _is_summary_with_number(line):
-            break
-        if in_table:
-            cleaned = line.strip().replace("|", " ").replace("—", "").strip()
-            if cleaned:
-                table_lines.append(cleaned)
-
-    if not table_lines:
-        return []
-
-    # Split table lines into per-item blocks: a new block starts when we find
-    # a line containing an English product word (>=4 chars uppercase)
-    blocks = []
-    current: list = []
-    for line in table_lines:
-        if re.search(r"[A-Z]{3,}", line) and current:
-            blocks.append(" ".join(current))
-            current = [line]
-        else:
-            current.append(line)
-    if current:
-        blocks.append(" ".join(current))
-
-    items = []
-    for block in blocks:
-        if not block.strip():
-            continue
-        parsed = parse_item_line(block)
-        if parsed and (parsed.get("Description") or parsed.get("SKU")):
-            items.append(parsed)
-    return items
-
-
-def extract_items_positional(word_df: pd.DataFrame, text: str):
+def extract_items_positional(word_df, text):
     items = []
 
     if not word_df.empty:
@@ -526,7 +367,14 @@ def extract_items_positional(word_df: pd.DataFrame, text: str):
             if any(h in line for h in HEADER_KW):
                 in_table = True
                 continue
-            if in_table and any(kw in line for kw in SUMMARY_KW):
+            if in_table and any(kw in line for kw in [
+                "\u0627\u0644\u0645\u062c\u0645\u0648\u0639",
+                "\u0627\u0644\u0642\u064a\u0645\u0629",
+                "\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a",
+                "\u0627\u0644\u0625\u062d\u0645\u0627\u0644\u064a",
+                "\u0645\u062f\u0641\u0648\u0639",
+                "\u0645\u0631\u062a\u062c\u0639",
+            ]):
                 break
             if not in_table:
                 continue
@@ -534,16 +382,17 @@ def extract_items_positional(word_df: pd.DataFrame, text: str):
             if parsed:
                 items.append(parsed)
 
-    # Fallback: any line with Arabic + English + 2+ numbers
     if not items:
         for line in text.split("\n"):
             line = line.strip()
-            if not line or any(kw in line for kw in SUMMARY_KW + HEADER_KW):
+            if not line:
                 continue
-            has_arabic = bool(re.search(r"[\u0600-\u06FF]{2,}", line))
+            if any(kw in line for kw in SUMMARY_KW + HEADER_KW):
+                continue
+            has_arabic  = bool(re.search(r"[\u0600-\u06FF]{2,}", line))
             has_english = bool(re.search(r"[A-Za-z]{2,}", line))
-            has_nums = len(re.findall(r"[\d,]+\.?\d*", line)) >= 2
-            if not (has_english and has_nums):
+            has_nums    = len(re.findall(r"[\d,]+\.?\d*", line)) >= 2
+            if not (has_arabic and has_english and has_nums):
                 continue
             parsed = parse_item_line(line)
             if parsed and (parsed["SKU"] or parsed["Description"]):
@@ -560,7 +409,7 @@ def is_summary_row(vals):
 def extract_items_native(pdf_path):
     items = []
     try:
-        with pdfplumber.open(str(pdf_path)) as pdf:
+        with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
                 for table in (page.extract_tables() or []):
                     for row in table:
@@ -576,41 +425,38 @@ def extract_items_native(pdf_path):
                         ]
                         if len(num_cells) < 2:
                             continue
-                        raw_sku = reshape(vals[5]) if len(vals) > 5 else ""
+                        raw_sku  = reshape(vals[5]) if len(vals) > 5 else ""
                         raw_desc = reshape(vals[4]) if len(vals) > 4 else ""
                         items.append({
-                            "Unit price": clean_number(vals[2]) if len(vals) > 2 else None,
-                            "Quantity": clean_number(vals[3]) if len(vals) > 3 else None,
+                            "Unit price":  clean_number(vals[2]) if len(vals) > 2 else None,
+                            "Quantity":    clean_number(vals[3]) if len(vals) > 3 else None,
                             "Description": raw_desc,
-                            "SKU": clean_sku(raw_sku),
+                            "SKU":         clean_sku(raw_sku),
                         })
     except Exception:
         pass
     return items
 
 
-# ---------------------------------------------------------------------------
-# Financial extraction
-# ---------------------------------------------------------------------------
-
-def extract_financials(text: str):
-    """Find total-before-tax, VAT, and total-after-tax using ratio 1.15."""
-    pos = max(text.find("\u0627\u0644\u0645\u062c\u0645\u0648\u0639"), 0)  # المجموع
-    # Also look for OCR-garbled variant
-    pos2 = max(text.find("\u0627\u0644\u0645\u062d\u0645\u0648\u062c"), 0)  # المحموج
-    fin_start = max(pos, pos2) if min(pos, pos2) == 0 else min(pos, pos2)
-    fin = text[fin_start:] if fin_start else text
+def extract_financials(text):
+    """
+    Ratio-based financial extraction (handles split-column OCR layouts).
+    Finds number pairs where large/small ~1.15 (the 15% VAT relationship).
+    Paid is always set to None (user requested Paid=0 always — handled in process_pdf).
+    """
+    pos = max(text.find("\u0627\u0644\u0645\u062c\u0645\u0648\u0639"), 0)
+    fin = text[pos:]
 
     nums_raw = []
     for n in re.findall(r"[\d,]+\.?\d*", fin):
         v = clean_number(n)
-        if v and v > 100 and v not in (15, 150):
+        if v and v > 100 and v != 15 and v != 150:
             nums_raw.append(v)
     unique = sorted(set(nums_raw))
 
     tb = ta = vat = None
 
-    # Strategy 1: pair with ratio ~1.15 (VAT relationship)
+    # Strategy 1: pair with ratio ~1.15
     best = float("inf")
     for i, small in enumerate(unique):
         for big in unique[i + 1:]:
@@ -622,7 +468,7 @@ def extract_financials(text: str):
                     tb = small
                     ta = big
 
-    # Strategy 2: (vat, total) where vat/total ~0.13
+    # Strategy 2: (vat, ta) where vat/ta ~0.13
     if ta is None:
         for big in reversed(unique):
             for small in unique:
@@ -634,7 +480,7 @@ def extract_financials(text: str):
             if ta:
                 break
 
-    # Strategy 3: largest number = total-after-tax
+    # Strategy 3: largest number = ta
     if ta is None and unique:
         ta = max(unique)
         tb = round(ta / 1.15, 2)
@@ -653,80 +499,59 @@ def extract_financials(text: str):
     )
 
 
-# ---------------------------------------------------------------------------
-# Metadata extraction
-# ---------------------------------------------------------------------------
-
-def extract_invoice_number(text: str) -> str:
-    """Extract invoice number using multiple strategies."""
-    for pattern in [
-        r"(?:\u0631\u0642\u0645|\u0631\u0647\u0645).{0,15}(?:\u0627\u0644\u0641\u0627\u062a\u0648\u0631\u0629|\u0627\u0644\u0645\u0627\u0631\u0648\u0631\u0629|\u0627\u0644\u063a\u0627\u062a\u0648\u0631\u0629).{0,5}(\d{4,6})",
-        r"(?:\u0627\u0644\u0641\u0627\u062a\u0648\u0631\u0629|\u0627\u0644\u063a\u0627\u062a\u0648\u0631\u0629|\u0627\u0644\u0645\u0627\u0631\u0648\u0631\u0629).{0,5}(\d{4,6})",
-        r"\b(0\d{4,5})\b",  # starts with 0 + 4-5 digits
+def extract_metadata(pdf_path, text):
+    inv_num = ""
+    for p in [
+        r"\u0631\u0642\u0645 \u0627\u0644\u0641\u0627\u062a\u0648\u0631\u0629\s*[:\s]*(\d{4,6})",
+        r"(?:\u0642\u0645 \u0627\u0644\u063a\u0627\u062a\u0648\u0631\u0629|\u0627\u0644\u063a\u0627\u062a\u0648\u0631\u0629)\s*(\d{4,6})",
+        r"\b(0\d{4,5})\b",
     ]:
-        m = re.search(pattern, text)
+        m = re.search(p, text)
         if m:
-            return m.group(1).strip()
-    return ""
+            inv_num = m.group(1).strip()
+            break
 
-
-def extract_address(text: str) -> str:
-    """Extract address after العنوان keyword."""
-    m = re.search(
-        r"(?:\u0627\u0644\u0639\u0646\u0648\u0627\u0646|\u0627\u0644\u0639\u0648\u0627\u0646)"  # العنوان / العوان (OCR)
-        r"[\s:]*(.+?)(?=\n\d{7,}|\n(?:\u0627\u0644\u0645\u062c\u0645\u0648\u0639|\u0645\u062f\u0641\u0648\u0639|\u0631\u0642\u0645 \u0627\u0644\u062d\u0633\u0627\u0628)|\Z)",
-        text, re.DOTALL,
-    )
-    if not m:
-        return ""
-    address = " ".join(m.group(1).split()).strip()
-    return re.sub(r"\s*\d{10}\s*$", "", address).strip()
-
-
-def extract_metadata(pdf_path, text: str) -> dict:
-    inv_num = extract_invoice_number(text)
-
-    date_m = re.search(r"(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})", text)
+    date_m   = re.search(r"(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})", text)
     inv_date = date_m.group(1) if date_m else ""
 
-    address = extract_address(text)
+    address = ""
+    m = re.search(
+        r"\u0627\u0644\u0639\u0646\u0648\u0627\u0646\s*[:\s]+(.+?)"
+        r"(?=\n\d{7,}|\n(?:\u0627\u0644\u0645\u062c\u0645\u0648\u0639|\u0645\u062f\u0641\u0648\u0639|\u0631\u0642\u0645 \u0627\u0644\u062d\u0633\u0627\u0628)|\Z)",
+        text, re.DOTALL,
+    )
+    if m:
+        address = " ".join(m.group(1).split()).strip()
+        address = re.sub(r"\s*\d{10}\s*$", "", address).strip()
 
     total_before, vat, total_after = extract_financials(text)
 
     return {
-        "Invoice Number": inv_num,
-        "Invoice Date": inv_date,
-        "Address": address,
-        "Balance": total_after,
-        "Paid": 0,
+        "Invoice Number":   inv_num,
+        "Invoice Date":     inv_date,
+        "Address":          address,
+        "Balance":          total_after,
+        "Paid":             0,          # always 0 as requested
         "Total before tax": total_before,
-        "VAT 15%": vat,
-        "Total after tax": total_after,
-        "Source File": Path(pdf_path).name,
+        "VAT 15%":          vat,
+        "Total after tax":  total_after,
+        "Source File":      pdf_path.name,
     }
 
 
-# ---------------------------------------------------------------------------
-# Main processing
-# ---------------------------------------------------------------------------
-
 def process_pdf(pdf_path):
-    pdf_path = Path(pdf_path)
     text, mode = get_text(pdf_path)
     meta = extract_metadata(pdf_path, text)
 
     if mode == "ocr":
         word_df = get_ocr_words(pdf_path)
-        items = extract_items_positional(word_df, text)
+        items   = extract_items_positional(word_df, text)
     else:
         word_df = pd.DataFrame()
-        items = extract_items_native(pdf_path)
-        if not items:
-            items = extract_items_multiline(text)
+        items   = extract_items_native(pdf_path)
         if not items:
             items = extract_items_positional(pd.DataFrame(), text)
 
-    # Customer name: filename is the most reliable source
     cname = extract_name_from_filename(pdf_path)
     if not cname or len(cname) < 4:
         cname = extract_customer_name_text(text)
@@ -734,8 +559,7 @@ def process_pdf(pdf_path):
         cname = ""
     meta["Customer Name"] = cname
 
-    # Deduplicate items
-    seen: set = set()
+    seen = set()
     unique_items = []
     for item in items:
         key = (item.get("Description", ""), item.get("Unit price"), item.get("Quantity"))
@@ -750,12 +574,8 @@ def process_pdf(pdf_path):
     return pd.DataFrame(rows).reindex(columns=FINAL_COLS), mode, text
 
 
-# ---------------------------------------------------------------------------
-# Streamlit UI
-# ---------------------------------------------------------------------------
-
 st.set_page_config(page_title="Invoice Extractor", layout="wide")
-st.title("\U0001f4c4 Invoice Extractor — PDF to Excel")
+st.title("\U0001f4c4 Invoice Extractor \u2014 PDF to Excel")
 
 uploaded_files = st.file_uploader(
     "Upload PDF or ZIP files", type=["pdf", "zip"], accept_multiple_files=True
@@ -773,7 +593,7 @@ if uploaded_files:
             if uf.name.endswith(".zip"):
                 with zipfile.ZipFile(fp) as z:
                     z.extractall(tmp)
-                pdf_paths.extend(tmp.glob("**/*.pdf"))
+                pdf_paths.extend(tmp.glob("*.pdf"))
             else:
                 pdf_paths.append(fp)
 
@@ -781,15 +601,11 @@ if uploaded_files:
         for i, path in enumerate(pdf_paths):
             st.write(f"\U0001f4c4 **{path.name}**")
             with st.spinner("Extracting..."):
-                try:
-                    df, mode, raw_text = process_pdf(path)
-                except Exception as exc:
-                    st.error(f"Failed: {exc}")
-                    continue
-            st.caption(f"Mode: `{mode}` — {len(df)} row(s)")
+                df, mode, raw_text = process_pdf(path)
+            st.caption(f"Mode: `{mode}` \u2014 {len(df)} row(s)")
 
             if debug_mode:
-                with st.expander(f"\U0001f4cb Full raw text — {path.name}", expanded=True):
+                with st.expander(f"\U0001f4cb Full raw text \u2014 {path.name}", expanded=True):
                     st.text(raw_text)
                     st.caption(f"Total characters: {len(raw_text)}")
                     st.download_button(
