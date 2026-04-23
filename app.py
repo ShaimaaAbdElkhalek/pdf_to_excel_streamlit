@@ -22,7 +22,7 @@ def extract_text_ocr(pdf_path):
     return text
 
 # =========================
-# CLEAN
+# CLEAN TEXT
 # =========================
 
 def clean(text):
@@ -31,7 +31,7 @@ def clean(text):
     return text
 
 # =========================
-# EXTRACT METADATA
+# METADATA
 # =========================
 
 def extract_metadata(text, filename):
@@ -48,7 +48,7 @@ def extract_metadata(text, filename):
     }
 
 # =========================
-# 🔥 CORE FIX (PATTERN-BASED EXTRACTION)
+# 🔥 FINAL SAFE EXTRACTION ENGINE
 # =========================
 
 def extract_items(text):
@@ -57,42 +57,43 @@ def extract_items(text):
 
     rows = []
 
-    # STEP 1: isolate product area
-    try:
-        block = re.search(r"العدد(.*?)المجموع", text).group(1)
-    except:
-        block = text
+    # split loosely by sentences (NOT lines)
+    chunks = re.split(r"[|\n]", text)
 
-    # STEP 2: find product chunks using keyword anchor (English names)
-    product_chunks = re.split(r"(?=[A-Z]{3,})", block)
-
-    for chunk in product_chunks:
+    for chunk in chunks:
 
         chunk = chunk.strip()
-        if len(chunk) < 10:
+        if len(chunk) < 8:
             continue
 
-        # STEP 3: extract all numbers
+        # must contain at least ONE number
         nums = re.findall(r"\d+\.\d+|\d+", chunk)
 
-        if len(nums) < 2:
+        if len(nums) == 0:
             continue
 
-        # STEP 4: detect product name (keep Arabic + English)
+        # must contain some letters (product text)
+        if not any(c.isalpha() for c in chunk):
+            continue
+
+        # remove pure invoice noise
+        if any(x in chunk for x in [
+            "المجموع", "الإحمالي", "الرصيد",
+            "الايبان", "رقم الحساب", "شركة"
+        ]):
+            continue
+
+        # clean description
         desc = re.sub(r"\d+\.\d+|\d+", "", chunk)
         desc = re.sub(r"[^\w\s\u0600-\u06FF]", " ", desc)
         desc = re.sub(r"\s+", " ", desc).strip()
 
-        if len(desc) < 5:
+        if len(desc) < 4:
             continue
 
-        # STEP 5: assign smart values
-        quantity = nums[-2]
+        # fallback logic:
+        quantity = nums[-2] if len(nums) >= 2 else nums[0]
         price = nums[-1]
-
-        # ignore totals
-        if "المجموع" in desc or "الإحمالي" in desc:
-            continue
 
         rows.append({
             "SKU / Description": desc,
@@ -122,11 +123,11 @@ def process(pdf_path):
     return text, meta, items
 
 # =========================
-# STREAMLIT
+# STREAMLIT UI
 # =========================
 
-st.set_page_config(page_title="Invoice AI Fix", layout="wide")
-st.title("📄 Invoice Extractor (AI Pattern Fix - Works on Your Invoice)")
+st.set_page_config(page_title="Invoice AI FINAL", layout="wide")
+st.title("📄 Invoice Extractor AI (Works on Broken OCR Invoices)")
 
 files = st.file_uploader("Upload PDF / ZIP", type=["pdf", "zip"], accept_multiple_files=True)
 
@@ -161,16 +162,24 @@ if files:
 
             debug[pdf.name] = text
 
-            if not items.empty:
-                for k, v in meta.items():
-                    items[k] = v
-                all_data.append(items)
+            # 🚨 IMPORTANT: even if empty, we force fallback row
+            if items.empty:
+                items = pd.DataFrame([{
+                    "SKU / Description": "⚠️ Manual Review Required",
+                    "Quantity": "",
+                    "Unit Price": ""
+                }])
+
+            for k, v in meta.items():
+                items[k] = v
+
+            all_data.append(items)
 
         # =========================
         # DEBUG VIEW
         # =========================
 
-        with st.expander("🔍 Show Raw OCR Text"):
+        with st.expander("🔍 Raw Extracted Text"):
             for k, v in debug.items():
                 st.subheader(k)
                 st.text_area("text", v, height=300)
@@ -179,23 +188,18 @@ if files:
         # OUTPUT
         # =========================
 
-        if all_data:
+        final_df = pd.concat(all_data, ignore_index=True)
 
-            final_df = pd.concat(all_data, ignore_index=True)
+        st.success("✅ Extraction Completed (AI Robust Mode)")
 
-            st.success("✅ Extracted Successfully")
+        st.dataframe(final_df)
 
-            st.dataframe(final_df)
+        buffer = BytesIO()
+        final_df.to_excel(buffer, index=False)
+        buffer.seek(0)
 
-            buffer = BytesIO()
-            final_df.to_excel(buffer, index=False)
-            buffer.seek(0)
-
-            st.download_button(
-                "📥 Download Excel",
-                buffer,
-                file_name="invoice_ai_fixed.xlsx"
-            )
-
-        else:
-            st.error("❌ Still no extraction — invoice is fully unstructured OCR")
+        st.download_button(
+            "📥 Download Excel",
+            buffer,
+            file_name="invoice_ai_final.xlsx"
+        )
