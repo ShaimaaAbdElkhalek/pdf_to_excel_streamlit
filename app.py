@@ -12,7 +12,7 @@ import pytesseract
 from pdf2image import convert_from_path
 
 # =========================
-# OCR
+# OCR TEXT
 # =========================
 
 def extract_text_ocr(pdf_path):
@@ -23,29 +23,29 @@ def extract_text_ocr(pdf_path):
     return text
 
 # =========================
-# NORMALIZE TEXT
+# NORMALIZE
 # =========================
 
 def normalize_text(text):
-    replacements = {
+    fixes = {
         "الغاتورة": "الفاتورة",
         "اإلجمالي": "الإجمالي",
         "إلجمالي": "الإجمالي"
     }
 
-    for k, v in replacements.items():
+    for k, v in fixes.items():
         text = text.replace(k, v)
 
     return text
 
 # =========================
-# METADATA EXTRACTION
+# METADATA
 # =========================
 
 def extract_metadata(text, filename):
 
-    def find(pattern):
-        m = re.search(rf"{pattern}\s*[:\-]?\s*(.+)", text)
+    def find(key):
+        m = re.search(rf"{key}\s*[:\-]?\s*(.+)", text)
         return m.group(1).strip() if m else ""
 
     return {
@@ -59,7 +59,7 @@ def extract_metadata(text, filename):
     }
 
 # =========================
-# SKU EXTRACTION (FIXED CORE)
+# SKU EXTRACTION (FIXED)
 # =========================
 
 def extract_items_from_text(text):
@@ -69,8 +69,8 @@ def extract_items_from_text(text):
 
     skip_keywords = [
         "المجموع", "الإجمالي", "الرصيد", "رقم الفاتورة",
-        "تاريخ", "العنوان", "الايبان", "رقم الحساب",
-        "مدفوع", "فاتورة", "شركة", "إلى", "من"
+        "تاريخ", "الايبان", "رقم الحساب", "مدفوع",
+        "شركة", "فاتورة", "العنوان", "إلى", "من"
     ]
 
     for line in lines:
@@ -79,33 +79,29 @@ def extract_items_from_text(text):
         if not line:
             continue
 
-        # 🚨 skip invoice/meta lines
         if any(k in line for k in skip_keywords):
             continue
 
         nums = re.findall(r"\d+\.?\d*", line)
 
-        # must look like product line
         if len(nums) < 2:
             continue
 
-        # remove obvious non-product junk
-        if len(line) < 8:
+        # split description safely
+        description = re.split(r"\s{2,}", line)[0]
+
+        description = re.sub(r"\d+\.?\d*", "", description)
+        description = re.sub(r"[^\w\s\u0600-\u06FF]", " ", description)
+        description = re.sub(r"\s+", " ", description).strip()
+
+        if len(description) < 4:
             continue
 
-        quantity = nums[-2]
-        price = nums[-1]
-
-        # clean description
-        desc = re.sub(r"\d+\.?\d*", "", line)
-        desc = re.sub(r"[^\w\s\u0600-\u06FF]", " ", desc)
-        desc = re.sub(r"\s+", " ", desc).strip()
-
-        if len(desc) < 4:
-            continue
+        quantity = nums[0]
+        price = nums[1]
 
         rows.append({
-            "Description": desc,
+            "SKU / Description": description,
             "Quantity": quantity,
             "Unit Price": price
         })
@@ -120,7 +116,6 @@ def process_pdf(pdf_path):
 
     text = ""
 
-    # try digital text first
     with fitz.open(pdf_path) as doc:
         text = "\n".join([p.get_text() for p in doc])
 
@@ -133,26 +128,23 @@ def process_pdf(pdf_path):
     meta = extract_metadata(text, pdf_path.name)
     items = extract_items_from_text(text)
 
-    # attach metadata to each SKU row
-    if not items.empty:
-        for k, v in meta.items():
-            items[k] = v
-        return items
-
-    return pd.DataFrame([meta])
+    return text, meta, items
 
 # =========================
 # STREAMLIT UI
 # =========================
 
-st.set_page_config(page_title="Invoice Extractor", layout="wide")
-st.title("📄 Invoice Extractor (Clean SKU Extraction Fixed)")
+st.set_page_config(page_title="Invoice Extractor Pro", layout="wide")
+st.title("📄 Invoice Extractor PRO (Debug + Clean SKU Extraction)")
 
 files = st.file_uploader(
     "Upload PDF / ZIP",
     type=["pdf", "zip"],
     accept_multiple_files=True
 )
+
+# store debug text
+debug_texts = {}
 
 if files:
 
@@ -161,7 +153,6 @@ if files:
         tmp = Path(tmp_dir)
         pdfs = []
 
-        # save uploads
         for f in files:
             path = tmp / f.name
             with open(path, "wb") as out:
@@ -177,22 +168,40 @@ if files:
         all_data = []
 
         for pdf in pdfs:
+
             st.write(f"📄 Processing: {pdf.name}")
 
-            df = process_pdf(pdf)
+            text, meta, items = process_pdf(pdf)
 
-            if not df.empty:
-                all_data.append(df)
+            # store for debug
+            debug_texts[pdf.name] = text
+
+            if not items.empty:
+                for k, v in meta.items():
+                    items[k] = v
+                all_data.append(items)
+
+        # =========================
+        # SHOW EXTRACTED TEXT (DEBUG BUTTON)
+        # =========================
+
+        with st.expander("🔍 Show Extracted Raw Text (DEBUG)"):
+            for name, text in debug_texts.items():
+                st.subheader(name)
+                st.text_area("Extracted Text", text, height=300)
+
+        # =========================
+        # FINAL OUTPUT
+        # =========================
 
         if all_data:
 
             final_df = pd.concat(all_data, ignore_index=True)
 
-            st.success("✅ Extraction Completed Successfully")
+            st.success("✅ Extraction Done (Clean SKU Mode)")
 
             st.dataframe(final_df)
 
-            # download
             buffer = BytesIO()
             final_df.to_excel(buffer, index=False)
             buffer.seek(0)
@@ -200,7 +209,7 @@ if files:
             st.download_button(
                 "📥 Download Excel",
                 buffer,
-                file_name="invoices_clean.xlsx"
+                file_name="clean_invoices.xlsx"
             )
 
         else:
