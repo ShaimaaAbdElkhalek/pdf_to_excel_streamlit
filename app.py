@@ -14,131 +14,75 @@ from pdf2image import convert_from_path
 # OCR
 # =========================
 
-def extract_text_ocr(pdf_path):
+def ocr(pdf_path):
     images = convert_from_path(pdf_path, dpi=300)
-    text = ""
-    for img in images:
-        text += pytesseract.image_to_string(img, lang="ara+eng") + "\n"
-    return text
+    return "\n".join(pytesseract.image_to_string(img, lang="ara+eng") for img in images)
 
 # =========================
-# CLEAN TEXT
+# CLEAN LIGHTLY (NO MEANING LOSS)
 # =========================
 
-def clean_text(text):
+def clean(text):
     text = text.replace("‏", "")
     text = re.sub(r"\s+", " ", text)
     return text
 
 # =========================
-# METADATA
+# RAW TABLE EXTRACTION (KEY PART)
 # =========================
 
-def extract_metadata(text, filename):
+def extract_raw_table(text):
 
-    def find(key):
-        m = re.search(rf"{key}\s*[:\-]?\s*(.+)", text)
-        return m.group(1).strip() if m else ""
+    text = clean(text)
 
-    return {
-        "Invoice Number": find("رقم الفاتورة"),
-        "Invoice Date": find("تاريخ"),
-        "Customer Name": find("اسم العميل"),
-        "Tax Number": find("الرقم الضريبي"),
-        "Source File": filename
-    }
+    # split into chunks using line breaks OR pipe
+    raw_rows = re.split(r"[\n]", text)
 
-# =========================
-# 🔥 CORE ENGINE (ROBUST OCR EXTRACTION)
-# =========================
+    table = []
 
-def extract_items(text):
+    for row in raw_rows:
 
-    text = clean_text(text)
-
-    rows = []
-
-    # STEP 1: find ALL numbers with positions
-    matches = [(m.group(), m.start()) for m in re.finditer(r"\d+\.\d+|\d+", text)]
-
-    # STEP 2: sliding window extraction
-    for i in range(len(matches) - 1):
-
-        num1, pos1 = matches[i]
-        num2, pos2 = matches[i + 1]
-
-        # skip huge numbers (totals / IBAN / noise)
-        if len(num1) > 6 or len(num2) > 6:
+        row = row.strip()
+        if len(row) < 5:
             continue
 
-        # STEP 3: context window around numbers
-        start = max(0, pos1 - 120)
-        end = min(len(text), pos2 + 120)
+        # keep EVERYTHING (no semantic filtering)
 
-        window = text[start:end]
-
-        # must contain letters (product check)
-        if not any(c.isalpha() for c in window):
+        # detect if row contains any numbers
+        if not re.search(r"\d", row):
             continue
 
-        # STEP 4: clean description
-        desc = re.sub(r"\d+\.\d+|\d+", "", window)
-        desc = re.sub(r"[^\w\s\u0600-\u06FF]", " ", desc)
-        desc = re.sub(r"\s+", " ", desc).strip()
+        # normalize spacing
+        row = re.sub(r"\s+", " ", row)
 
-        if len(desc) < 6:
-            continue
+        table.append(row)
 
-        # filter noise
-        if any(x in desc for x in ["المجموع", "الإحمالي", "الرصيد", "الايبان"]):
-            continue
-
-        quantity = num1
-        price = num2
-
-        rows.append({
-            "SKU / Description": desc,
-            "Quantity": quantity,
-            "Unit Price": price
-        })
-
-    df = pd.DataFrame(rows)
-
-    if not df.empty:
-        df = df.drop_duplicates()
-
-    return df
+    return pd.DataFrame({"RAW_ROW": table})
 
 # =========================
-# PROCESS PDF
+# PROCESS
 # =========================
 
-def process_pdf(pdf_path):
+def process(pdf_path):
 
     text = ""
 
     with fitz.open(pdf_path) as doc:
-        text = "\n".join([page.get_text() for page in doc])
+        text = "\n".join(page.get_text() for page in doc)
 
-    # OCR fallback
     if len(text.strip()) < 50:
-        text = extract_text_ocr(pdf_path)
+        text = ocr(pdf_path)
 
-    meta = extract_metadata(text, pdf_path.name)
-    items = extract_items(text)
-
-    return text, meta, items
+    return text, extract_raw_table(text)
 
 # =========================
-# STREAMLIT UI
+# STREAMLIT
 # =========================
 
-st.set_page_config(page_title="Invoice Extractor PRO", layout="wide")
-st.title("📄 Invoice Extractor PRO (Handles Fully Unstructured OCR)")
+st.set_page_config(page_title="Raw Table Extractor", layout="wide")
+st.title("📄 RAW TABLE Extractor (No Interpretation Mode)")
 
 files = st.file_uploader("Upload PDF / ZIP", type=["pdf", "zip"], accept_multiple_files=True)
-
-debug_store = {}
 
 if files:
 
@@ -159,45 +103,21 @@ if files:
             else:
                 pdfs.append(path)
 
-        all_data = []
+        all_tables = []
 
         for pdf in pdfs:
 
-            st.write(f"📄 Processing: {pdf.name}")
+            st.write(f"📄 {pdf.name}")
 
-            text, meta, items = process_pdf(pdf)
+            text, df = process(pdf)
 
-            debug_store[pdf.name] = text
+            df["SOURCE"] = pdf.name
 
-            # force fallback if empty (never crash)
-            if items.empty:
-                items = pd.DataFrame([{
-                    "SKU / Description": "⚠️ Needs manual review (OCR too noisy)",
-                    "Quantity": "",
-                    "Unit Price": ""
-                }])
+            all_tables.append(df)
 
-            for k, v in meta.items():
-                items[k] = v
+        final_df = pd.concat(all_tables, ignore_index=True)
 
-            all_data.append(items)
-
-        # =========================
-        # DEBUG VIEW
-        # =========================
-
-        with st.expander("🔍 Show Extracted Raw Text"):
-            for name, txt in debug_store.items():
-                st.subheader(name)
-                st.text_area("text", txt, height=300)
-
-        # =========================
-        # OUTPUT
-        # =========================
-
-        final_df = pd.concat(all_data, ignore_index=True)
-
-        st.success("✅ Extraction Completed (Robust OCR Engine)")
+        st.success("✅ RAW TABLE EXTRACTED")
 
         st.dataframe(final_df)
 
@@ -206,7 +126,7 @@ if files:
         buffer.seek(0)
 
         st.download_button(
-            "📥 Download Excel",
+            "📥 Download Raw Table",
             buffer,
-            file_name="invoice_output.xlsx"
+            file_name="raw_table.xlsx"
         )
