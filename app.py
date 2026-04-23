@@ -11,15 +11,15 @@ import pytesseract
 from pdf2image import convert_from_path
 
 # =========================
-# OCR fallback
+# OCR
 # =========================
 
-def ocr_pdf(pdf_path):
+def ocr(pdf_path):
     images = convert_from_path(pdf_path, dpi=300)
     return "\n".join(pytesseract.image_to_string(img, lang="ara+eng") for img in images)
 
 # =========================
-# clean text
+# CLEAN
 # =========================
 
 def clean(text):
@@ -28,49 +28,54 @@ def clean(text):
     return text
 
 # =========================
-# 🔥 TABLE EXTRACTION (FIXED FOR YOUR FORMAT)
+# 🔥 FINAL ROBUST EXTRACTION ENGINE
 # =========================
 
-def extract_table(text):
+def extract_items(text):
 
     text = clean(text)
 
     rows = []
 
-    # 1. isolate ONLY product table section
-    match = re.search(r"العدد.*?(المجموع|الإحمالي|الرصيد المستحق)", text, re.S)
-    table_text = match.group(0) if match else text
+    # STEP 1: find ALL numbers with positions
+    numbers = [(m.group(), m.start()) for m in re.finditer(r"\d+\.\d+|\d+", text)]
 
-    # 2. split by product boundary (English words = product marker)
-    chunks = re.split(r"(?=[A-Z]{3,})", table_text)
+    # STEP 2: cluster numbers into groups of 3 (price, qty, price/total mix)
+    for i in range(len(numbers) - 2):
 
-    for chunk in chunks:
+        n1, p1 = numbers[i]
+        n2, p2 = numbers[i + 1]
+        n3, p3 = numbers[i + 2]
 
-        chunk = chunk.strip()
-        if len(chunk) < 10:
+        # filter noise (IBAN, totals)
+        if len(n1) > 6 or len(n2) > 6 or len(n3) > 6:
             continue
 
-        # must contain numbers
-        nums = re.findall(r"\d+\.\d+|\d+", chunk)
+        # STEP 3: extract surrounding context window
+        start = max(0, p1 - 150)
+        end = min(len(text), p3 + 150)
 
-        if len(nums) < 2:
+        window = text[start:end]
+
+        # must contain letters
+        if not any(c.isalpha() for c in window):
             continue
 
-        # remove numbers → description
-        desc = re.sub(r"\d+\.\d+|\d+", "", chunk)
+        # STEP 4: clean description
+        desc = re.sub(r"\d+\.\d+|\d+", "", window)
         desc = re.sub(r"[^\w\s\u0600-\u06FF]", " ", desc)
         desc = re.sub(r"\s+", " ", desc).strip()
 
         if len(desc) < 5:
             continue
 
-        # ignore totals/noise
-        if any(x in desc for x in ["المجموع", "الإحمالي", "الرصيد"]):
+        # STEP 5: remove invoice noise
+        if any(x in desc for x in ["المجموع", "الإحمالي", "الرصيد", "الايبان"]):
             continue
 
-        # your structure: last 2 numbers = qty + price
-        quantity = nums[-2]
-        unit_price = nums[-1]
+        # STEP 6: assign values
+        quantity = n2
+        unit_price = n3
 
         rows.append({
             "SKU / Description": desc,
@@ -78,13 +83,18 @@ def extract_table(text):
             "Unit Price": unit_price
         })
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+
+    if not df.empty:
+        df = df.drop_duplicates()
+
+    return df
 
 # =========================
-# process PDF
+# PROCESS PDF
 # =========================
 
-def process_pdf(pdf_path):
+def process(pdf_path):
 
     text = ""
 
@@ -92,24 +102,20 @@ def process_pdf(pdf_path):
         text = "\n".join(page.get_text() for page in doc)
 
     if len(text.strip()) < 50:
-        text = ocr_pdf(pdf_path)
+        text = ocr(pdf_path)
 
-    return text, extract_table(text)
+    return text, extract_items(text)
 
 # =========================
 # STREAMLIT APP
 # =========================
 
-st.set_page_config(page_title="Invoice Table Extractor", layout="wide")
-st.title("📄 Invoice Table Extractor (Fixed for Your OCR Format)")
+st.set_page_config(page_title="Invoice AI FINAL", layout="wide")
+st.title("📄 Invoice Extractor (FINAL ROBUST ENGINE)")
 
-files = st.file_uploader(
-    "Upload PDF / ZIP",
-    type=["pdf", "zip"],
-    accept_multiple_files=True
-)
+files = st.file_uploader("Upload PDF / ZIP", type=["pdf", "zip"], accept_multiple_files=True)
 
-debug = {}
+debug_store = {}
 
 if files:
 
@@ -134,15 +140,16 @@ if files:
 
         for pdf in pdfs:
 
-            st.write(f"📄 Processing: {pdf.name}")
+            st.write(f"📄 {pdf.name}")
 
-            text, df = process_pdf(pdf)
+            text, df = process(pdf)
 
-            debug[pdf.name] = text
+            debug_store[pdf.name] = text
 
+            # FORCE fallback if empty (never fail)
             if df.empty:
                 df = pd.DataFrame([{
-                    "SKU / Description": "⚠️ No table detected",
+                    "SKU / Description": "⚠️ Manual review needed",
                     "Quantity": "",
                     "Unit Price": ""
                 }])
@@ -152,13 +159,13 @@ if files:
             all_data.append(df)
 
         # =========================
-        # DEBUG VIEW
+        # DEBUG TEXT
         # =========================
 
-        with st.expander("🔍 Show Extracted Text"):
-            for name, txt in debug.items():
-                st.subheader(name)
-                st.text_area("text", txt, height=300)
+        with st.expander("🔍 Raw OCR Text"):
+            for k, v in debug_store.items():
+                st.subheader(k)
+                st.text_area("text", v, height=300)
 
         # =========================
         # OUTPUT
@@ -166,7 +173,7 @@ if files:
 
         final_df = pd.concat(all_data, ignore_index=True)
 
-        st.success("✅ Table Extracted Successfully")
+        st.success("✅ Extraction Completed")
 
         st.dataframe(final_df)
 
@@ -177,5 +184,5 @@ if files:
         st.download_button(
             "📥 Download Excel",
             buffer,
-            file_name="invoice_table.xlsx"
+            file_name="invoice_final.xlsx"
         )
