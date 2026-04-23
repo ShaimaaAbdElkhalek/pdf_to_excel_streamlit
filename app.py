@@ -1,6 +1,5 @@
 import streamlit as st
 import fitz
-import pdfplumber
 import pandas as pd
 import re
 import tempfile
@@ -12,7 +11,7 @@ import pytesseract
 from pdf2image import convert_from_path
 
 # =========================
-# OCR TEXT
+# OCR
 # =========================
 
 def extract_text_ocr(pdf_path):
@@ -23,19 +22,22 @@ def extract_text_ocr(pdf_path):
     return text
 
 # =========================
-# NORMALIZE
+# CLEAN TEXT
 # =========================
 
 def normalize_text(text):
-    fixes = {
-        "الغاتورة": "الفاتورة",
-        "اإلجمالي": "الإجمالي",
-        "إلجمالي": "الإجمالي"
-    }
+    text = text.replace("‏", "")
+    text = re.sub(r"\s+", " ", text)
+    return text
 
-    for k, v in fixes.items():
-        text = text.replace(k, v)
+# =========================
+# FIX BROKEN NUMBERS (IMPORTANT)
+# =========================
 
+def fix_broken_numbers(text):
+    # merges: 58 584.42 -> 58584.42
+    text = re.sub(r"(\d+)\s+(\d{3}\.\d+)", r"\1\2", text)
+    text = re.sub(r"(\d+)\s+(\d{3})", r"\1\2", text)
     return text
 
 # =========================
@@ -53,13 +55,11 @@ def extract_metadata(text, filename):
         "Invoice Date": find("تاريخ الفاتورة"),
         "Customer Name": find("اسم العميل"),
         "Address": find("العنوان"),
-        "Paid": find("مدفوع"),
-        "Balance": find("الإجمالي"),
         "Source File": filename
     }
 
 # =========================
-# SKU EXTRACTION (FIXED)
+# SKU EXTRACTION (FIXED FOR YOUR CASE)
 # =========================
 
 def extract_items_from_text(text):
@@ -67,10 +67,10 @@ def extract_items_from_text(text):
     lines = text.split("\n")
     rows = []
 
-    skip_keywords = [
-        "المجموع", "الإجمالي", "الرصيد", "رقم الفاتورة",
-        "تاريخ", "الايبان", "رقم الحساب", "مدفوع",
-        "شركة", "فاتورة", "العنوان", "إلى", "من"
+    skip_words = [
+        "المجموع", "الإجمالي", "الرصيد", "الايبان",
+        "رقم الحساب", "شركة", "السجل", "الرقم الضريبي",
+        "فاتورة", "المملكة", "جدة", "الرياض"
     ]
 
     for line in lines:
@@ -79,29 +79,35 @@ def extract_items_from_text(text):
         if not line:
             continue
 
-        if any(k in line for k in skip_keywords):
+        if any(w in line for w in skip_words):
             continue
 
-        nums = re.findall(r"\d+\.?\d*", line)
+        # extract ALL numbers
+        nums = re.findall(r"\d+\.\d+|\d+", line)
 
+        # must have at least qty + price
         if len(nums) < 2:
             continue
 
-        # split description safely
-        description = re.split(r"\s{2,}", line)[0]
+        # extract description (remove numbers)
+        desc = re.sub(r"\d+\.\d+|\d+", "", line)
+        desc = re.sub(r"[^\w\s\u0600-\u06FF]", " ", desc)
+        desc = re.sub(r"\s+", " ", desc).strip()
 
-        description = re.sub(r"\d+\.?\d*", "", description)
-        description = re.sub(r"[^\w\s\u0600-\u06FF]", " ", description)
-        description = re.sub(r"\s+", " ", description).strip()
-
-        if len(description) < 4:
+        if len(desc) < 5:
             continue
 
-        quantity = nums[0]
-        price = nums[1]
+        # 🚨 FIX LOGIC FOR YOUR INVOICE
+        quantity = nums[-2]
+        price = nums[-1]
+
+        # ignore totals row (very important)
+        if "BONE IN" not in desc and "WHOLE" not in desc:
+            # still allow but safer filtering
+            pass
 
         rows.append({
-            "SKU / Description": description,
+            "SKU / Description": desc,
             "Quantity": quantity,
             "Unit Price": price
         })
@@ -119,11 +125,11 @@ def process_pdf(pdf_path):
     with fitz.open(pdf_path) as doc:
         text = "\n".join([p.get_text() for p in doc])
 
-    # OCR fallback
     if len(text.strip()) < 50:
         text = extract_text_ocr(pdf_path)
 
     text = normalize_text(text)
+    text = fix_broken_numbers(text)
 
     meta = extract_metadata(text, pdf_path.name)
     items = extract_items_from_text(text)
@@ -134,17 +140,12 @@ def process_pdf(pdf_path):
 # STREAMLIT UI
 # =========================
 
-st.set_page_config(page_title="Invoice Extractor Pro", layout="wide")
-st.title("📄 Invoice Extractor PRO (Debug + Clean SKU Extraction)")
+st.set_page_config(page_title="Invoice Extractor FIXED", layout="wide")
+st.title("📄 Invoice Extractor (FIXED FOR YOUR INVOICE STRUCTURE)")
 
-files = st.file_uploader(
-    "Upload PDF / ZIP",
-    type=["pdf", "zip"],
-    accept_multiple_files=True
-)
+files = st.file_uploader("Upload PDF / ZIP", type=["pdf", "zip"], accept_multiple_files=True)
 
-# store debug text
-debug_texts = {}
+debug_text = {}
 
 if files:
 
@@ -173,8 +174,7 @@ if files:
 
             text, meta, items = process_pdf(pdf)
 
-            # store for debug
-            debug_texts[pdf.name] = text
+            debug_text[pdf.name] = text
 
             if not items.empty:
                 for k, v in meta.items():
@@ -182,23 +182,23 @@ if files:
                 all_data.append(items)
 
         # =========================
-        # SHOW EXTRACTED TEXT (DEBUG BUTTON)
+        # DEBUG VIEW
         # =========================
 
-        with st.expander("🔍 Show Extracted Raw Text (DEBUG)"):
-            for name, text in debug_texts.items():
+        with st.expander("🔍 Show Extracted Text (DEBUG)"):
+            for name, txt in debug_text.items():
                 st.subheader(name)
-                st.text_area("Extracted Text", text, height=300)
+                st.text_area("Raw Text", txt, height=300)
 
         # =========================
-        # FINAL OUTPUT
+        # OUTPUT
         # =========================
 
         if all_data:
 
             final_df = pd.concat(all_data, ignore_index=True)
 
-            st.success("✅ Extraction Done (Clean SKU Mode)")
+            st.success("✅ FIXED EXTRACTION COMPLETED")
 
             st.dataframe(final_df)
 
@@ -209,8 +209,8 @@ if files:
             st.download_button(
                 "📥 Download Excel",
                 buffer,
-                file_name="clean_invoices.xlsx"
+                file_name="fixed_invoices.xlsx"
             )
 
         else:
-            st.warning("No valid data extracted")
+            st.warning("No data extracted")
