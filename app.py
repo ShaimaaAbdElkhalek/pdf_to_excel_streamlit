@@ -1,132 +1,52 @@
-import streamlit as st
-import fitz
-import pandas as pd
 import re
-import tempfile
-import zipfile
-from pathlib import Path
-from io import BytesIO
+import pandas as pd
 
-import pytesseract
-from pdf2image import convert_from_path
+def extract_table(text):
 
-# =========================
-# OCR
-# =========================
-
-def ocr(pdf_path):
-    images = convert_from_path(pdf_path, dpi=300)
-    return "\n".join(pytesseract.image_to_string(img, lang="ara+eng") for img in images)
-
-# =========================
-# CLEAN LIGHTLY (NO MEANING LOSS)
-# =========================
-
-def clean(text):
+    # normalize
     text = text.replace("‏", "")
     text = re.sub(r"\s+", " ", text)
-    return text
 
-# =========================
-# RAW TABLE EXTRACTION (KEY PART)
-# =========================
+    rows = []
 
-def extract_raw_table(text):
+    # STEP 1: find all number clusters (this is your REAL table anchor)
+    pattern = re.finditer(r"(\d{1,3}(?:,\d{3})*\.?\d*)", text)
 
-    text = clean(text)
+    numbers = [(m.group(), m.start()) for m in pattern]
 
-    # split into chunks using line breaks OR pipe
-    raw_rows = re.split(r"[\n]", text)
+    # STEP 2: group numbers in triplets (qty / price / extra noise)
+    for i in range(len(numbers) - 2):
 
-    table = []
+        n1, p1 = numbers[i]
+        n2, p2 = numbers[i + 1]
+        n3, p3 = numbers[i + 2]
 
-    for row in raw_rows:
-
-        row = row.strip()
-        if len(row) < 5:
+        # skip huge numbers (totals, IBAN, etc.)
+        if len(n1) > 6 or len(n2) > 6 or len(n3) > 6:
             continue
 
-        # keep EVERYTHING (no semantic filtering)
+        # STEP 3: extract surrounding text window
+        start = max(0, p1 - 120)
+        end = min(len(text), p3 + 120)
 
-        # detect if row contains any numbers
-        if not re.search(r"\d", row):
+        window = text[start:end]
+
+        # must contain product text
+        if not any(c.isalpha() for c in window):
             continue
 
-        # normalize spacing
-        row = re.sub(r"\s+", " ", row)
+        # STEP 4: clean description
+        desc = re.sub(r"\d{1,3}(?:,\d{3})*\.?\d*", "", window)
+        desc = re.sub(r"[^\w\s\u0600-\u06FF]", " ", desc)
+        desc = re.sub(r"\s+", " ", desc).strip()
 
-        table.append(row)
+        if len(desc) < 5:
+            continue
 
-    return pd.DataFrame({"RAW_ROW": table})
+        rows.append({
+            "Description": desc,
+            "Quantity": n2,
+            "Unit Price": n3
+        })
 
-# =========================
-# PROCESS
-# =========================
-
-def process(pdf_path):
-
-    text = ""
-
-    with fitz.open(pdf_path) as doc:
-        text = "\n".join(page.get_text() for page in doc)
-
-    if len(text.strip()) < 50:
-        text = ocr(pdf_path)
-
-    return text, extract_raw_table(text)
-
-# =========================
-# STREAMLIT
-# =========================
-
-st.set_page_config(page_title="Raw Table Extractor", layout="wide")
-st.title("📄 RAW TABLE Extractor (No Interpretation Mode)")
-
-files = st.file_uploader("Upload PDF / ZIP", type=["pdf", "zip"], accept_multiple_files=True)
-
-if files:
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-
-        tmp = Path(tmp_dir)
-        pdfs = []
-
-        for f in files:
-            path = tmp / f.name
-            with open(path, "wb") as out:
-                out.write(f.read())
-
-            if f.name.endswith(".zip"):
-                with zipfile.ZipFile(path, "r") as z:
-                    z.extractall(tmp)
-                pdfs += list(tmp.glob("*.pdf"))
-            else:
-                pdfs.append(path)
-
-        all_tables = []
-
-        for pdf in pdfs:
-
-            st.write(f"📄 {pdf.name}")
-
-            text, df = process(pdf)
-
-            df["SOURCE"] = pdf.name
-
-            all_tables.append(df)
-
-        final_df = pd.concat(all_tables, ignore_index=True)
-
-        st.success("✅ RAW TABLE EXTRACTED")
-
-        st.dataframe(final_df)
-
-        buffer = BytesIO()
-        final_df.to_excel(buffer, index=False)
-        buffer.seek(0)
-
-        st.download_button(
-            "📥 Download Raw Table",
-            buffer,
-            file_name="raw_table.xlsx"
-        )
+    return pd.DataFrame(rows)
