@@ -16,7 +16,7 @@ from bidi.algorithm import get_display
 import pytesseract
 from pdf2image import convert_from_path
 
-# Windows users فقط
+# Uncomment if Windows
 # pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 # =========================
@@ -45,6 +45,40 @@ def extract_text_ocr(pdf_path):
         return ""
 
 # =========================
+# TEXT NORMALIZATION 🔥
+# =========================
+
+def normalize_text(text):
+    replacements = {
+        "الغاتورة": "الفاتورة",
+        "اإلجمالي": "الإجمالي",
+        "الاجمالي": "الإجمالي",
+        "تارخ": "تاريخ",
+        "العميل:": "اسم العميل"
+    }
+
+    for wrong, correct in replacements.items():
+        text = text.replace(wrong, correct)
+
+    return text
+
+# =========================
+# FUZZY FIND FIELD 🔥
+# =========================
+
+def find_field(text, keywords):
+    if isinstance(keywords, str):
+        keywords = [keywords]
+
+    for keyword in keywords:
+        pattern = rf"{keyword}\s*[:\-]?\s*(.+)"
+        match = re.search(pattern, text)
+        if match:
+            return match.group(1).strip()
+
+    return ""
+
+# =========================
 # NUMBER CLEANING 🔥
 # =========================
 
@@ -54,17 +88,12 @@ def clean_number(val):
 
     val = str(val)
 
-    # remove garbage
     val = re.sub(r"[^\d.,]", "", val)
-
-    # normalize Arabic
     val = val.replace("٫", ".").replace("٬", "")
 
-    # OCR explosion protection
     if len(val) > 15:
         return None
 
-    # fix multiple dots
     if val.count(".") > 1:
         parts = val.split(".")
         val = parts[0] + "." + "".join(parts[1:])
@@ -75,7 +104,7 @@ def clean_number(val):
         return None
 
 # =========================
-# METADATA
+# METADATA EXTRACTION
 # =========================
 
 def extract_metadata(pdf_path):
@@ -87,21 +116,34 @@ def extract_metadata(pdf_path):
             st.warning(f"⚠️ OCR used for {pdf_path.name}")
             full_text = extract_text_ocr(pdf_path)
 
-        def find_field(text, keyword):
-            pattern = rf"{keyword}\s*[:\-]?\s*(.+)"
-            match = re.search(pattern, text)
-            return match.group(1).strip() if match else ""
+        full_text = normalize_text(full_text)
 
-        return {
-            "Invoice Number": find_field(full_text, "رقم الفاتورة"),
-            "Invoice Date": find_field(full_text, "تاريخ الفاتورة"),
-            "Customer Name": find_field(full_text, "اسم العميل"),
-            "Address": find_field(full_text, "العنوان"),
-            "Paid": find_field(full_text, "مدفوع"),
-            "Balance": find_field(full_text, "الإجمالي"),
-            "Not Paid": find_field(full_text, "الرصيد المستحق"),
+        metadata = {
+            "Invoice Number": find_field(full_text, [
+                "رقم الفاتورة", "فاتورة رقم", "رقم الغاتورة", "Invoice No"
+            ]),
+            "Invoice Date": find_field(full_text, [
+                "تاريخ الفاتورة", "تاريخ", "Invoice Date"
+            ]),
+            "Customer Name": find_field(full_text, [
+                "اسم العميل", "العميل", "Customer"
+            ]),
+            "Address": find_field(full_text, [
+                "العنوان", "Address"
+            ]),
+            "Paid": find_field(full_text, [
+                "مدفوع", "Paid"
+            ]),
+            "Balance": find_field(full_text, [
+                "الإجمالي", "Total"
+            ]),
+            "Not Paid": find_field(full_text, [
+                "الرصيد المستحق"
+            ]),
             "Source File": pdf_path.name
         }
+
+        return metadata
 
     except Exception as e:
         st.error(f"Metadata error: {e}")
@@ -127,13 +169,13 @@ def extract_tables(pdf_path):
     try:
         with pdfplumber.open(pdf_path) as pdf:
             all_data = []
-            found_table = False
+            found = False
 
             for page in pdf.pages:
                 tables = page.extract_tables()
 
                 if tables:
-                    found_table = True
+                    found = True
 
                 for table in tables:
                     if not table:
@@ -161,7 +203,7 @@ def extract_tables(pdf_path):
                         all_data.append(pd.DataFrame(merged, columns=headers[:len(merged[0])]))
 
             # OCR fallback
-            if not found_table:
+            if not found:
                 st.warning(f"⚠️ OCR table fallback: {pdf_path.name}")
                 text = extract_text_ocr(pdf_path)
 
@@ -198,7 +240,7 @@ def process_pdf(pdf_path):
 # =========================
 
 st.set_page_config(page_title="Invoice Extractor", layout="wide")
-st.title("📄 Arabic Invoice Extractor")
+st.title("📄 Arabic Invoice Extractor (OCR + Smart Parsing)")
 
 files = st.file_uploader("Upload PDF or ZIP", type=["pdf", "zip"], accept_multiple_files=True)
 
@@ -221,7 +263,7 @@ if files:
 
         all_data = []
         for pdf in pdfs:
-            st.write(f"📄 {pdf.name}")
+            st.write(f"📄 Processing: {pdf.name}")
             df = process_pdf(pdf)
             if not df.empty:
                 all_data.append(df)
@@ -229,7 +271,7 @@ if files:
         if all_data:
             final_df = pd.concat(all_data, ignore_index=True)
 
-            # ================= CLEAN NUMBERS =================
+            # Clean numbers
             for col in ["Total before tax", "Paid", "Balance", "Not Paid"]:
                 if col in final_df.columns:
                     final_df[col] = final_df[col].apply(clean_number)
@@ -245,20 +287,13 @@ if files:
                     axis=1
                 )
 
-            # Date fix
+            # Fix date
             if "Invoice Date" in final_df.columns:
                 final_df["Invoice Date"] = pd.to_datetime(
                     final_df["Invoice Date"], errors="coerce", dayfirst=True
                 ).dt.strftime("%m/%d/%Y")
 
-            # Remove garbage rows
-            if "Total before tax" in final_df.columns:
-                final_df = final_df[
-                    (final_df["Total before tax"].notna()) |
-                    (final_df["Description"].notna())
-                ]
-
-            st.success("✅ Done")
+            st.success("✅ Extraction Complete")
             st.dataframe(final_df)
 
             buffer = BytesIO()
