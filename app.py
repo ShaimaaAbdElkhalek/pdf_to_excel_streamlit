@@ -1,86 +1,68 @@
 import streamlit as st
 import pdfplumber
-import pandas as pd
 import tempfile
+import pandas as pd
+from pdf2image import convert_from_path
+import pytesseract
 from io import BytesIO
 
-# Optional Arabic support
-try:
-    import arabic_reshaper
-    from bidi.algorithm import get_display
-
-    def reshape(text):
-        try:
-            return get_display(arabic_reshaper.reshape(text))
-        except:
-            return text
-except:
-    def reshape(text):
-        return text
-
 
 # -----------------------------
-# SAFE TEXT EXTRACTION
+# OCR + TEXT EXTRACTION
 # -----------------------------
-def extract_text_safe(page):
+def extract_text(pdf_path):
+    text = ""
+
+    # 1. Try normal text extraction
     try:
-        text = page.extract_text()
-        if text:
-            return text
-    except Exception:
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                t = page.extract_text()
+                if t:
+                    text += t + "\n"
+    except:
         pass
 
-    # fallback: try extracting words
-    try:
-        words = page.extract_words()
-        if words:
-            return " ".join([w["text"] for w in words])
-    except Exception:
-        pass
+    # 2. If empty → OCR
+    if not text.strip():
+        images = convert_from_path(pdf_path)
+        for img in images:
+            text += pytesseract.image_to_string(img) + "\n"
 
-    return ""
+    return text
 
 
 # -----------------------------
 # PROCESS PDF
 # -----------------------------
-def process_pdf(pdf_file):
-    all_rows = []
-
+def process_pdf(file):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(pdf_file.read())
-        tmp_path = tmp.name
+        tmp.write(file.read())
+        pdf_path = tmp.name
 
-    with pdfplumber.open(tmp_path) as pdf:
-        for page in pdf.pages:
-            text = extract_text_safe(page)
+    text = extract_text(pdf_path)
 
-            if not text:
-                continue
-
-            text = reshape(text)
-
-            lines = [l.strip() for l in text.split("\n") if l.strip()]
-
-            for line in lines:
-                cols = line.split()  # simple split (safe)
-                all_rows.append(cols)
-
-    if not all_rows:
+    if not text.strip():
         return pd.DataFrame()
 
-    max_len = max(len(r) for r in all_rows)
-    cleaned = [r + [""] * (max_len - len(r)) for r in all_rows]
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    data = [l.split() for l in lines]
 
-    return pd.DataFrame(cleaned)
+    if not data:
+        return pd.DataFrame()
+
+    max_len = max(len(r) for r in data)
+    data = [r + [""] * (max_len - len(r)) for r in data]
+
+    return pd.DataFrame(data)
 
 
 # -----------------------------
 # STREAMLIT UI
 # -----------------------------
-st.set_page_config(page_title="PDF to Excel", layout="wide")
+st.set_page_config(page_title="PDF OCR to Excel", layout="wide")
 
-st.title("📄 PDF → Excel Converter (Stable Version)")
+st.title("📄 PDF → Excel Converter (OCR + Smart Mode)")
 
 uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
 
@@ -89,7 +71,7 @@ if uploaded_file:
         df = process_pdf(uploaded_file)
 
     if df.empty:
-        st.error("No data found in PDF 😢")
+        st.error("No data found 😢 (PDF might be encrypted or image-only with poor OCR)")
     else:
         st.success("Done!")
 
@@ -101,7 +83,7 @@ if uploaded_file:
 
         st.download_button(
             "📥 Download Excel",
-            output,
+            data=output,
             file_name="output.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
