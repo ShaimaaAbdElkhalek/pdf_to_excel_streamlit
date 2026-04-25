@@ -1,79 +1,107 @@
 import streamlit as st
+import tempfile
 import pandas as pd
 import re
+from pdf2image import convert_from_path
+import pytesseract
+from io import BytesIO
 
 
 # -----------------------------
-# CLEAN FUNCTION
+# CLEAN TEXT
 # -----------------------------
-def clean_cell(text):
-    if not text:
-        return ""
-
-    # fix Arabic encoding noise
-    text = re.sub(r'[^\w\s\u0600-\u06FF%:.,()/\-\+\"]', ' ', text)
-
-    # normalize spaces
-    text = re.sub(r'\s+', ' ', text).strip()
-
-    return text
+def clean_text(text):
+    text = re.sub(r'[^\w\s\u0600-\u06FF%:.,()/\-\+\n]', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
 
 # -----------------------------
-# PARSE ROWS (TAB / OCR OUTPUT)
+# OCR FUNCTION
 # -----------------------------
-def parse_data(raw_text):
+def extract_text(pdf_path):
+    images = convert_from_path(pdf_path, dpi=400)
+
+    config = r'--oem 3 --psm 6 -l ara+eng'
+
+    full_text = []
+
+    for img in images:
+        text = pytesseract.image_to_string(img, config=config)
+        text = clean_text(text)
+        full_text.append(text)
+
+    return "\n\n".join(full_text)
+
+
+# -----------------------------
+# STRUCTURE TEXT INTO TABLE
+# -----------------------------
+def to_table(text):
     rows = []
 
-    for line in raw_text.split("\n"):
+    for line in text.split("\n"):
         line = line.strip()
 
-        if not line:
+        if len(line) < 2:
             continue
 
-        # split by tabs OR multiple spaces
+        # split smartly
         cols = re.split(r'\t+|\s{2,}', line)
 
-        cols = [clean_cell(c) for c in cols if c.strip()]
+        cols = [c.strip() for c in cols if c.strip()]
 
-        if len(cols) >= 5:  # filter valid rows only
+        if len(cols) >= 3:
             rows.append(cols)
 
-    return rows
+    if not rows:
+        return pd.DataFrame()
+
+    max_len = max(len(r) for r in rows)
+    rows = [r + [""] * (max_len - len(r)) for r in rows]
+
+    return pd.DataFrame(rows)
 
 
 # -----------------------------
 # STREAMLIT UI
 # -----------------------------
-st.set_page_config(page_title="Structured Invoice Cleaner", layout="wide")
+st.set_page_config(page_title="OCR Invoice Tool", layout="wide")
 
-st.title("📊 OCR → Structured Invoice Table")
+st.title("📄 OCR PDF → Text + Table + Excel")
 
-input_text = st.text_area("Paste OCR raw data here", height=300)
+uploaded_file = st.file_uploader("Upload OCR PDF", type=["pdf"])
 
-if input_text:
+if uploaded_file:
 
-    data = parse_data(input_text)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(uploaded_file.read())
+        path = tmp.name
 
-    if not data:
-        st.error("No structured data found 😢")
+    with st.spinner("Processing OCR..."):
+        text = extract_text(path)
+        df = to_table(text)
+
+    # ---------------- TEXT VIEW ----------------
+    st.subheader("📜 Clean OCR Text")
+    st.text_area("Text Output", text, height=300)
+
+    # ---------------- TABLE VIEW ----------------
+    st.subheader("📊 Structured Data")
+    if df.empty:
+        st.warning("Could not structure data properly 😢")
     else:
-        # normalize columns length
-        max_len = max(len(r) for r in data)
-        data = [r + [""] * (max_len - len(r)) for r in data]
-
-        df = pd.DataFrame(data)
-
-        st.success("Structured table created ✅")
-
         st.dataframe(df)
 
-        # download excel
-        excel = df.to_excel(index=False, engine="openpyxl")
+    # ---------------- DOWNLOAD EXCEL ----------------
+    if not df.empty:
+        output = BytesIO()
+        df.to_excel(output, index=False, engine="openpyxl")
+        output.seek(0)
 
         st.download_button(
             "📥 Download Excel",
-            data=open,
-            file_name="structured_invoice.xlsx"
+            data=output,
+            file_name="ocr_output.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-        
