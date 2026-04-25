@@ -1,80 +1,51 @@
 import streamlit as st
-import tempfile
-from pdf2image import convert_from_path
-import pytesseract
 import re
+import unicodedata
 
-# Arabic fixing
 import arabic_reshaper
 from bidi.algorithm import get_display
 
 
 # -----------------------------
-# CLEAN TEXT
+# FIX BROKEN ARABIC (IMPORTANT PART)
 # -----------------------------
-def clean_text(text):
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
+def fix_arabic_text(text):
+    # 1. Normalize unicode
+    text = unicodedata.normalize("NFKC", text)
 
+    # 2. Remove weird OCR artifacts
+    text = re.sub(r'[^\w\s\u0600-\u06FF%:.,()/\-+]', ' ', text)
 
-# -----------------------------
-# FIX ARABIC RTL PROPERLY
-# -----------------------------
-def fix_arabic(text):
+    # 3. Fix Arabic shaping + direction
     try:
-        reshaped = arabic_reshaper.reshape(text)
-        bidi_text = get_display(reshaped)
-        return bidi_text
+        text = arabic_reshaper.reshape(text)
+        text = get_display(text)
     except:
-        return text
+        pass
 
+    # 4. Clean spaces
+    text = re.sub(r'\s+', ' ', text).strip()
 
-# -----------------------------
-# OCR FUNCTION
-# -----------------------------
-def pdf_to_text(pdf_path):
-    images = convert_from_path(pdf_path, dpi=350)
-
-    result = []
-
-    for img in images:
-        config = r'--oem 3 --psm 6 -l ara+eng'
-
-        text = pytesseract.image_to_string(img, config=config)
-
-        text = clean_text(text)
-        text = fix_arabic(text)
-
-        if text:
-            result.append(text)
-
-    return "\n\n".join(result)
+    return text
 
 
 # -----------------------------
 # STREAMLIT UI
 # -----------------------------
-st.set_page_config(page_title="Arabic OCR Fixed", layout="wide")
+st.set_page_config(page_title="Fix Arabic OCR Text", layout="wide")
 
-st.title("📄 OCR عربي + إنجليزي (مُحسن)")
+st.title("🔧 إصلاح النص العربي المشوه")
 
-file = st.file_uploader("Upload PDF", type=["pdf"])
+input_text = st.text_area("Paste your broken OCR text here", height=300)
 
-if file:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(file.read())
-        path = tmp.name
+if input_text:
+    fixed = fix_arabic_text(input_text)
 
-    with st.spinner("Processing Arabic text correctly..."):
-        text = pdf_to_text(path)
-
-    st.success("Done!")
-
-    st.text_area("📜 OCR Output (Fixed Arabic)", text, height=500)
+    st.subheader("✅ Fixed Text")
+    st.text_area("", fixed, height=400)
 
     st.download_button(
-        "📥 Download Text",
-        text,
-        file_name="arabic_ocr.txt",
-        mime="text/plain"
+        "📥 Download Fixed Text",
+        fixed,
+        file_name="fixed_text.txt"
     )
