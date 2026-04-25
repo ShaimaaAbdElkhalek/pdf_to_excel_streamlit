@@ -173,10 +173,11 @@ def get_nums(segment):
     return[n for n in matches if clean_number(n) and clean_number(n) > 0]
 
 def parse_item_line(line, tb_val=0.0):
-    line_clean = re.sub(r"[\(\)\[\]]\s*\d+\s*[\(\)\[\]]", " ", line)
+    # مسح الأقواس لتجنب تداخل الأرقام مثل (99) أو (510)
+    line_clean = re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", line)
 
     raw_nums = get_nums(line_clean)
-    valid_strs = []
+    valid_strs =[]
     cand_floats =[]
     
     for s in raw_nums:
@@ -187,40 +188,52 @@ def parse_item_line(line, tb_val=0.0):
             
     if len(cand_floats) < 2: return None
 
-    if cand_floats[-1] > 100 or len(cand_floats) >= 4:
-        cand_floats = cand_floats[:-1]
-        valid_strs = valid_strs[:-1]
-        
-    if len(cand_floats) < 1: return None
+    # حذف الإجمالي من السطر إذا كان موجوداً في النهاية لكي لا نشوش على الكمية والسعر
+    row_total = None
+    if len(cand_floats) >= 3 and cand_floats[-1] > 100 and cand_floats[-1] > cand_floats[-2]:
+        row_total = cand_floats[-1]
+
+    # فصل الأرقام التي بها علامة عشرية (السعر) عن الأرقام الصحيحة (الكمية)
+    integers_strs =[s for s in valid_strs if '.' not in s]
+    decimals_strs =[s for s in valid_strs if '.' in s]
+
+    # تخطي أرقام الأكواد المزعجة حتى لا يعتبرها كمية
+    sku_nums =['18', '99', '510', '106', '6']
+    integers_strs =[s for s in integers_strs if s not in sku_nums]
 
     qty = None
     unit_price = None
 
-    # 💡 البحث عن السعر بالعلامة العشرية، وما قبله هو الكمية (القاعدة الذهبية)
-    decimal_indices =[i for i, s in enumerate(valid_strs) if '.' in s]
-    
-    if decimal_indices:
-        price_idx = decimal_indices[0]
-        unit_price = cand_floats[price_idx]
-        
-        if price_idx > 0:
-            qty = cand_floats[price_idx - 1]
-        else:
-            qty = cand_floats[0]
-            
-    else:
-        if len(cand_floats) >= 2:
-            qty = cand_floats[-2]
-            unit_price = cand_floats[-1]
-        else:
-            qty = cand_floats[0]
-            unit_price = cand_floats[0]
+    # 💡 القاعدة الذهبية: أول رقم صحيح متبقي هو الكمية
+    if integers_strs:
+        qty = clean_number(integers_strs[0])
 
+    decimals_vals = [clean_number(s) for s in decimals_strs]
+    
+    # 💡 القاعدة الذهبية: الرقم ذو العلامة العشرية هو السعر
+    if decimals_vals:
+        if len(decimals_vals) >= 2 and decimals_vals[-1] > 100 and decimals_vals[-1] > decimals_vals[-2] * 2:
+            unit_price = decimals_vals[-2]
+        else:
+            if len(decimals_vals) == 1 and row_total and decimals_vals[0] == row_total:
+                unit_price = None
+            else:
+                unit_price = decimals_vals[-1]
+
+    # احتياطي إذا فشل الـ OCR في قراءة الفاصلة العشرية
+    if unit_price is None and len(integers_strs) >= 2:
+        unit_price = clean_number(integers_strs[1])
+        
+    if qty is None and cand_floats:
+        qty = cand_floats[0]
+
+    # التأكد من كتابة الكمية كرقم صحيح
     if qty is not None:
         try:
             qty = int(qty) if float(qty).is_integer() else qty
         except: pass
 
+    # توحيد اسم المنتج بشكل قاطع باستخدام الكتالوج المبرمج مسبقاً
     std_sku, std_desc = standardize_product(line)
     if std_sku:
         sku, desc = std_sku, std_desc
@@ -281,9 +294,8 @@ def extract_metadata(pdf_path, text):
     # 💡 تنظيف النص من أرقام البنوك والتواريخ حتى لا تتدخل في المجاميع المالية
     safe_text = re.sub(r'SA\d{22}', '', text)
     safe_text = re.sub(r'\b\d{10,}\b', '', safe_text)
-    safe_text = re.sub(r'\d{1,2}[/\-]\d{1,2}[/\-]\d{4}', '', safe_text) # حذف التواريخ (مثل 2026)
+    safe_text = re.sub(r'\d{1,2}[/\-]\d{1,2}[/\-]\d{4}', '', safe_text) 
 
-    # إضافة الإإحمالي (بالأخطاء الإملائية) للبحث القوي
     m_tot = re.search(r'(?:الإ[جح]مالي|الإإ[جح]مالي|اإلجمالي|الاجمالي|الإجمالي)\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
     if m_tot: ta = clean_number(m_tot.group(1))
 
@@ -293,7 +305,6 @@ def extract_metadata(pdf_path, text):
     m_vat = re.search(r'(?:القيمة المضافة|المضافة|15%)\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
     if m_vat: vat = clean_number(m_vat.group(1))
 
-    # 💡 تحديث خوارزمية الإنقاذ لتبحث عن النتيجة الأفضل ولا تتسرع
     if not ta or not tb:
         nums_raw =[clean_number(n) for n in re.findall(r"[\d,]+\.?\d*", safe_text) if clean_number(n) and clean_number(n) > 100]
         unique = sorted(set(nums_raw))
@@ -312,7 +323,6 @@ def extract_metadata(pdf_path, text):
         if not tb and best_tb: tb = best_tb
         if not ta and best_ta: ta = best_ta
 
-    # التأكيد النهائي
     if ta:
         expected_tb = round(ta / 1.15, 2)
         expected_vat = round(ta - expected_tb, 2)
@@ -361,7 +371,7 @@ def process_pdf(pdf_path):
     if not items:
         items =[{"Unit price": None, "Quantity": None, "Description": "", "SKU": ""}]
 
-    rows = [{**meta, **item} for item in items]
+    rows =[{**meta, **item} for item in items]
     return pd.DataFrame(rows).reindex(columns=FINAL_COLS), mode, text
 
 # =====================
