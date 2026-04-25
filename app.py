@@ -41,9 +41,7 @@ UNIT_WORDS = {
 }
 
 HEADER_KW =["البند", "الوصف", "العدد", "سعر الوحدة", "الكمية", "الوحدة"]
-
 STOP_KWS =["المجموع", "القيمة المضافة", "الإجمالي", "الإحمالي", "اإلجمالي", "الاجمالي", "الرصيد", "الايبان", "رقم الحساب"]
-
 SKIP_KWS =["العنوان", "الضريبي", "السجل", "تاريخ", "العميل", "فاكس", "هاتف", "جوال", "إلى", "رقم الفاتورة", "رقم الغاتورة", "الفاتورة", "الغاتورة", "مدفوع", "مرتجع"]
 
 FINAL_COLS =[
@@ -54,20 +52,42 @@ FINAL_COLS =[
     "Source File",
 ]
 
-# قاموس لاستنتاج الوصف الإنجليزي من العربي
-SKU_TO_DESC = {
-    "فيل ليج هندي صاحبة": "VEAL LEG SAHIBA",
-    "فيل ليج هندي": "VEAL LEG HINDI",
-    "فيل ليج": "VEAL LEG",
-    "فوركوارتر هندي": "FOREQUARTER HINDI",
-    "فوركوارتر": "FOREQUARTER",
-}
+# 💡 كتالوج توحيد المنتجات (بمجرد رؤية كلمة مفتاحية، يتم كتابة الاسم الرسمي)
+PRODUCT_CATALOG = [
+    {
+        "keywords":["فيل ليج", "VEAL LEG", "فيل"],
+        "sku": "فيل ليج هندي صاحبة 18 ك (510)",
+        "desc": "VEAL LEG SAHIBA"
+    },
+    {
+        "keywords":["فوركوارتر", "FOREQUARTER", "FQ", "ROLL", "AMBER"],
+        "sku": "فوركوارتر هندي عمبر",
+        "desc": "FQ FOREQUARTER AMBER"
+    },
+    {
+        "keywords":["كبدة", "LAMBLIVER", "كبدة ضأن", "JUNNE"],
+        "sku": "كبدة ضأن استرالي جوني جولد",
+        "desc": "LAMBLIVER JUNNE GOLD"
+    },
+    {
+        "keywords": ["عجل مقطع", "BONEINCUT"],
+        "sku": "عجل مقطع افيكو نيوزلاندي",
+        "desc": "BONEINCUT WAY"
+    },
+    {
+        "keywords":["فخده", "WHOLE LEG", "رستم"],
+        "sku": "فخده كامله هندي رستم",
+        "desc": "WHOLE LEG RUSTAM"
+    }
+]
 
-# 💡 قاموس التصحيح التلقائي لتوحيد أسماء المنتجات (بسبب أخطاء الـ OCR)
-SKU_CORRECTIONS = {
-    "فيل ليج هندي صاحبة 18 (510)": "فيل ليج هندي صاحبة 18 ك (510)",
-    # يمكنك إضافة أي منتجات أخرى هنا مستقبلاً
-}
+def standardize_product(raw_text):
+    """يبحث في النص عن كلمة مفتاحية ويرد الاسم الرسمي الموحد"""
+    for product in PRODUCT_CATALOG:
+        for kw in product["keywords"]:
+            if kw.upper() in raw_text.upper():
+                return product["sku"], product["desc"]
+    return None, None
 
 def clean_sku(raw_sku):
     cleaned = re.sub(r"\|", " ", raw_sku)
@@ -84,15 +104,7 @@ def extract_sku_from_line(line):
         b_clean = "(" + re.search(r"\d+", b).group() + ")"
         if b_clean not in raw.replace(" ", ""):
             raw = raw + " " + b_clean
-    
-    sku = clean_sku(raw)
-    
-    # 💡 تطبيق قاموس التوحيد
-    for wrong, correct in SKU_CORRECTIONS.items():
-        if sku == wrong or wrong in sku:
-            sku = correct
-            
-    return sku
+    return clean_sku(raw)
 
 def get_text(pdf_path):
     with fitz.open(pdf_path) as doc:
@@ -125,7 +137,7 @@ def get_ocr_words(pdf_path):
     except Exception:
         with fitz.open(pdf_path) as doc:
             pix = doc[0].get_pixmap(matrix=fitz.Matrix(3, 3))
-        img = Image.frombytes("RGB",[pix.width, pix.height], pix.samples)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     data = pytesseract.image_to_data(
         img, lang="ara+eng", config="--psm 6",
         output_type=pytesseract.Output.DATAFRAME,
@@ -154,7 +166,7 @@ def reconstruct_table_rows(word_df, y_tolerance=15):
 def get_nums(segment):
     return[n for n in re.findall(r"[\d,]+\.?\d*", segment) if clean_number(n) not in (0, None) and len(re.sub(r"[,.]", "", n)) <= 8]
 
-def parse_item_line(line):
+def parse_item_line(line, tb_val=0.0):
     eng_matches = list(re.finditer(r"[A-Za-z]{2,}", line))
     if eng_matches:
         first_start = eng_matches[0].start()
@@ -178,7 +190,7 @@ def parse_item_line(line):
         candidates =[n for n in all_nums if n not in pack_bracket]
         row_total = None
     else:
-        candidates =[n for n in all_nums[:-1] if n not in pack_bracket]
+        candidates = [n for n in all_nums[:-1] if n not in pack_bracket]
         rt = clean_number(all_nums[-1])
         row_total = rt if rt and rt > 100 else None
 
@@ -190,73 +202,71 @@ def parse_item_line(line):
     cand_vals = [clean_number(n) for n in candidates if clean_number(n)]
     matched = False
 
-    if row_total and row_total > 0:
+    # 💡 الترتيب الذكي: اختبار (إجمالي السطر) ثم اختبار (إجمالي الفاتورة) لتجاوز أرقام الأوزان
+    targets =[]
+    if row_total and row_total > 0: targets.append(row_total)
+    if tb_val and tb_val > 0: targets.append(tb_val)
+
+    for target in targets:
         for i, v1 in enumerate(cand_vals):
             for j, v2 in enumerate(cand_vals):
                 if i == j: continue
-                if abs(v1 * v2 - row_total) / row_total < 0.05: 
-                    leftovers =[v for idx, v in enumerate(cand_vals) if idx not in (i, j)]
-                    if leftovers:
-                        ints =[v for v in leftovers if float(v).is_integer()]
-                        qty = max(ints) if ints else leftovers[0]
-                        unit_price = min(v1, v2)
+                # إذا وجدنا أن حاصل الضرب = الإجمالي
+                if abs(v1 * v2 - target) / target < 0.05:
+                    is_v1_int = float(v1).is_integer()
+                    is_v2_int = float(v2).is_integer()
+                    # أولوية تخصيص الرقم الصحيح للكمية
+                    if is_v1_int and not is_v2_int:
+                        qty, unit_price = v1, v2
+                    elif is_v2_int and not is_v1_int:
+                        qty, unit_price = v2, v1
                     else:
-                        if float(v1).is_integer() and not float(v2).is_integer():
+                        # في حالة الرقمين صحيحين، يتم أخذ الترتيب الأصلي في السطر (الكمية أولاً)
+                        if i < j:
                             qty, unit_price = v1, v2
-                        elif float(v2).is_integer() and not float(v1).is_integer():
-                            qty, unit_price = v2, v1
                         else:
-                            qty = min(v1, v2)
-                            unit_price = max(v1, v2)
+                            qty, unit_price = v2, v1
                     matched = True
                     break
             if matched: break
+        if matched: break
 
+    # حالة احتياطية إذا فشلت كل المعادلات
     if not matched:
-        decimals =[clean_number(n) for n in candidates if "." in str(n) and clean_number(n)]
-        ints =[clean_number(n) for n in candidates if "." not in str(n) and clean_number(n)]
+        decimals =[v for v in cand_vals if not float(v).is_integer()]
+        ints =[v for v in cand_vals if float(v).is_integer()]
         
         if decimals and ints:
             unit_price = decimals[0]
             qty = max(ints)
         elif len(cand_vals) >= 2:
-            qty = min(cand_vals[0], cand_vals[1])
-            unit_price = max(cand_vals[0], cand_vals[1])
+            qty = cand_vals[0]
+            unit_price = cand_vals[1]
         elif cand_vals:
             unit_price = cand_vals[0]
 
+    # إزالة الفواصل من الكمية
     if qty is not None:
         try:
             qty = int(qty) if float(qty).is_integer() else qty
         except:
             pass
 
-    all_eng = re.findall(r"[A-Za-z]{2,}", line)
-    desc_words =[w for w in all_eng if len(w) >= 4 or w.isupper()]
-    seen_w, deduped = set(),[]
-    for w in desc_words:
-        if w.upper() not in seen_w:
-            seen_w.add(w.upper())
-            deduped.append(w)
-    desc = " ".join(deduped).strip()
-    sku = extract_sku_from_line(line)
-
-    if sku and desc:
-        for ar_key, en_val in SKU_TO_DESC.items():
-            if ar_key in sku:
-                dwords = desc.upper().split()
-                if all(w in en_val.upper() for w in dwords) and desc.upper() != en_val.upper(): desc = en_val
-                break
-    elif sku and not desc:
-        for ar_key, en_val in SKU_TO_DESC.items():
-            if ar_key in sku:
-                desc = en_val
-                break
+    # 💡 تطبيق الكتالوج لتوحيد اسم المنتج بشكل قاطع
+    std_sku, std_desc = standardize_product(line)
+    
+    if std_sku and std_desc:
+        sku, desc = std_sku, std_desc
+    else:
+        all_eng = re.findall(r"[A-Za-z]{2,}", line)
+        desc_words =[w for w in all_eng if len(w) >= 4 or w.isupper()]
+        desc = " ".join(dict.fromkeys(desc_words)).strip()
+        sku = extract_sku_from_line(line)
 
     if not (sku or desc): return None
     return {"SKU": sku, "Description": desc, "Quantity": qty, "Unit price": unit_price}
 
-def extract_items_positional(word_df, text):
+def extract_items_positional(word_df, text, tb_val):
     items =[]
     
     if not word_df.empty:
@@ -274,7 +284,7 @@ def extract_items_positional(word_df, text):
             if any(kw in t for kw in SKIP_KWS) or any(kw in t for kw in HEADER_KW):
                 continue
                 
-            parsed = parse_item_line(t)
+            parsed = parse_item_line(t, tb_val)
             if parsed: items.append(parsed)
 
     if not items:
@@ -291,7 +301,7 @@ def extract_items_positional(word_df, text):
             if any(kw in line for kw in SKIP_KWS) or any(kw in line for kw in HEADER_KW):
                 continue
                 
-            parsed = parse_item_line(line)
+            parsed = parse_item_line(line, tb_val)
             if parsed: 
                 items.append(parsed)
 
@@ -306,7 +316,7 @@ def extract_items_positional(word_df, text):
 def is_summary_row(vals):
     return any(kw in " ".join(vals) for kw in STOP_KWS)
 
-def extract_items_native(pdf_path):
+def extract_items_native(pdf_path, tb_val):
     items =[]
     try:
         with pdfplumber.open(pdf_path) as pdf:
@@ -316,15 +326,22 @@ def extract_items_native(pdf_path):
                         if not row: continue
                         vals =[str(c).strip() if c else "" for c in row]
                         if is_summary_row(vals): continue
-                        num_cells =[v for v in vals if re.sub(r"[,.\s]", "", v).isdigit() and 1 <= len(re.sub(r"[,.\s]", "", v)) <= 8]
+                        num_cells = [v for v in vals if re.sub(r"[,.\s]", "", v).isdigit() and 1 <= len(re.sub(r"[,.\s]", "", v)) <= 8]
                         if len(num_cells) < 2: continue
+                        
                         raw_sku  = reshape(vals[5]) if len(vals) > 5 else ""
                         raw_desc = reshape(vals[4]) if len(vals) > 4 else ""
+                        
+                        # توحيد المنتج
+                        std_sku, std_desc = standardize_product(raw_desc + " " + raw_sku)
+                        sku = std_sku if std_sku else clean_sku(raw_sku)
+                        desc = std_desc if std_desc else raw_desc
+                        
                         items.append({
                             "Unit price": clean_number(vals[2]) if len(vals) > 2 else None,
                             "Quantity": clean_number(vals[3]) if len(vals) > 3 else None,
-                            "Description": raw_desc,
-                            "SKU": clean_sku(raw_sku),
+                            "Description": desc,
+                            "SKU": sku,
                         })
     except Exception: pass
     return items
@@ -347,7 +364,7 @@ def extract_metadata(pdf_path, text):
     if m_date: inv_date = m_date.group(1).strip()
 
     address = ""
-    m_add = re.search(r'العنوان\s*:\s*(.+?)(?=\n\s*05|\n\s*\d{10}|\n\s*البند|\n\s*المجموع|05\d{8}|فيل|كبدة|عجل|فخده)', text, re.DOTALL)
+    m_add = re.search(r'العنوان\s*:\s*(.+?)(?=\n\s*05|\n\s*\d{10}|\n\s*البند|\n\s*المجموع|05\d{8}|فيل|كبدة|عجل|فخده|فوركوارتر)', text, re.DOTALL)
     if m_add:
         address = m_add.group(1).replace('\n', ' ').strip()
         address = re.sub(r'\s*\d{10}\s*$', '', address).strip()
@@ -355,7 +372,7 @@ def extract_metadata(pdf_path, text):
     tb = ta = vat = paid = bal = 0.0
 
     safe_text = re.sub(r'SA\d{22}', '', text)
-    safe_text = re.sub(r'\b\d{12,}\b', '', safe_text)
+    safe_text = re.sub(r'\b\d{10,}\b', '', safe_text) # تنظيف الأرقام البنكية
 
     m_tot = re.search(r'الإ[جح]مالي\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
     if m_tot: ta = clean_number(m_tot.group(1))
@@ -366,6 +383,31 @@ def extract_metadata(pdf_path, text):
     m_vat = re.search(r'(?:القيمة المضافة|المضافة|15%)\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
     if m_vat: vat = clean_number(m_vat.group(1))
 
+    # 💡 الباحث الرياضي (Math Scanner): لإنقاذ الفواتير التي تشتت فيها الأرقام (مثل 2717)
+    if not ta or not tb:
+        nums_raw =[]
+        for n in re.findall(r"[\d,]+\.?\d*", safe_text):
+            v = clean_number(n)
+            if v and v > 100: nums_raw.append(v)
+        
+        unique = sorted(set(nums_raw))
+        best_diff = float("inf")
+        found_ta, found_tb = ta, tb
+        
+        for i, small in enumerate(unique):
+            for big in unique[i + 1:]:
+                r = big / small
+                if 1.10 <= r <= 1.20: # النسبة 1.15
+                    diff = abs(r - 1.15)
+                    if diff < best_diff:
+                        best_diff = diff
+                        found_tb = small
+                        found_ta = big
+                        
+        if not ta and found_ta: ta = found_ta
+        if not tb and found_tb: tb = found_tb
+
+    # تأكيد التصحيح النهائي
     if ta:
         expected_tb = round(ta / 1.15, 2)
         expected_vat = round(ta - expected_tb, 2)
@@ -394,15 +436,16 @@ def extract_metadata(pdf_path, text):
 def process_pdf(pdf_path):
     text, mode = get_text(pdf_path)
     meta = extract_metadata(pdf_path, text)
+    tb_val = meta.get("Total before tax", 0.0)
 
     if mode == "ocr":
         word_df = get_ocr_words(pdf_path)
-        items   = extract_items_positional(word_df, text)
+        items   = extract_items_positional(word_df, text, tb_val)
     else:
         word_df = pd.DataFrame()
-        items   = extract_items_native(pdf_path)
+        items   = extract_items_native(pdf_path, tb_val)
         if not items:
-            items = extract_items_positional(pd.DataFrame(), text)
+            items = extract_items_positional(pd.DataFrame(), text, tb_val)
 
     file_cname = extract_name_from_filename(pdf_path)
     if file_cname and len(file_cname) > 3:
@@ -424,9 +467,12 @@ def process_pdf(pdf_path):
     if not unique_items:
         unique_items =[{"Unit price": None, "Quantity": None, "Description": "", "SKU": ""}]
 
-    rows =[{**meta, **item} for item in unique_items]
+    rows = [{**meta, **item} for item in unique_items]
     return pd.DataFrame(rows).reindex(columns=FINAL_COLS), mode, text
 
+# =====================
+# Streamlit App UI
+# =====================
 st.set_page_config(page_title="Invoice Extractor", layout="wide")
 st.title("📄 Invoice Extractor — PDF to Excel")
 
