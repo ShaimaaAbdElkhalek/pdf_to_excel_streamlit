@@ -178,85 +178,69 @@ def reconstruct_table_rows(word_df, y_tolerance=15):
     return rows
 
 def get_nums_with_context(segment):
-    # استخراج الأرقام مع الحفاظ على الفواصل العشرية للتعرف عليها
+    # نستخرج الأرقام كنصوص للحفاظ على العلامة العشرية لتطبيق القاعدة الذهبية
     seg_clean = segment.replace(",", "")
-    matches = re.findall(r"\b\d+(?:\.\d+)?\b", seg_clean)
+    matches = re.finditer(r"\b\d+(?:\.\d+)?\b", seg_clean)
     res =[]
     for m in matches:
-        v = clean_number(m)
+        s = m.group(0)
+        v = clean_number(s)
         if v is not None and v > 0:
-            res.append((m, v))
+            res.append((s, v))
     return res
 
 def parse_item_line(line, tb_val=0.0):
-    # تنظيف الأقواس لتجنب تداخل أرقام مثل (510) أو (99)
-    line_clean = re.sub(r"[\(\)\[\]]\s*\d+\s*[\(\)\[\]]", " ", line)
-    nums = get_nums_with_context(line_clean)
-    
-    if len(nums) < 2: return None
+    # مسح الأقواس لتجنب تداخل الأرقام مثل (99) أو (510)
+    line_clean = re.sub(r"[\(\)\[\]]\s*\d+(?:\.\d+)?\s*[\(\)\[\]]", " ", line)
+
+    raw_nums = get_nums_with_context(line_clean)
+    if len(raw_nums) < 2: return None
+
+    # مسح المجموع من السطر إذا كان موجوداً في النهاية لكي لا نشوش على الكمية والسعر
+    if raw_nums[-1][1] > 100 and len(raw_nums) >= 3 and raw_nums[-1][1] > raw_nums[-2][1] * 1.5:
+        raw_nums = raw_nums[:-1]
+        
+    if len(raw_nums) < 1: return None
 
     qty = None
     unit_price = None
-    matched = False
 
-    # 1. المطابقة الرياضية القاطعة (الكمية × السعر = الإجمالي)
-    for i, (s1, v1) in enumerate(nums):
-        for j, (s2, v2) in enumerate(nums):
-            if i >= j: continue
-            for k, (s3, v3) in enumerate(nums):
-                if k == i or k == j: continue
-                # إذا تطابقت حسبة الضرب
-                if abs(v1 * v2 - v3) / v3 < 0.05:
-                    if '.' in s1 and '.' not in s2:
-                        unit_price, qty = v1, v2
-                    elif '.' in s2 and '.' not in s1:
-                        unit_price, qty = v2, v1
-                    else:
-                        unit_price, qty = max(v1, v2), min(v1, v2)
-                    matched = True
-                    break
-            if matched: break
-        if matched: break
-
-    # 2. 💡 القاعدة الذهبية (التي اقترحتها أنت): الفاصلة العشرية هي السعر، وما قبلها هو العدد!
-    if not matched:
-        # نستبعد أرقام الأكواد المعروفة من أن تكون كميات
-        sku_nums = {18, 99, 510, 106, 6, 2, 4, 3590, 10, 9}
+    # 💡 القاعدة الذهبية: الرقم ذو العلامة العشرية (السعر)، والرقم الصحيح (الكمية)
+    decimal_indices =[i for i, (s, v) in enumerate(raw_nums) if '.' in s]
+    sku_nums = {18, 99, 510, 106, 3590} # أكواد مستبعدة من كونها كميات
+    
+    if decimal_indices:
+        # نأخذ آخر رقم عشري ونعتبره السعر
+        price_idx = decimal_indices[-1]
+        unit_price = raw_nums[price_idx][1]
         
-        decimals =[(i, s, v) for i, (s, v) in enumerate(nums) if '.' in s]
-        integers =[(i, s, v) for i, (s, v) in enumerate(nums) if '.' not in s and v not in sku_nums]
-        
-        if decimals:
-            # إذا كان هناك أكثر من رقم عشري (مثل السعر والمجموع)، نختار السعر بذكاء
-            if len(decimals) >= 2 and decimals[-1][2] > 100 and decimals[-1][2] > decimals[-2][2] * 1.5:
-                price_candidate = decimals[-2]
-            else:
-                price_candidate = decimals[-1]
+        # 1. نبحث عن الكمية (الرقم الصحيح) قبل السعر
+        for idx in range(price_idx - 1, -1, -1):
+            if '.' not in raw_nums[idx][0] and raw_nums[idx][1] not in sku_nums:
+                qty = raw_nums[idx][1]
+                break
                 
-            unit_price = price_candidate[2]
-            price_idx = price_candidate[0]
+        # 2. إذا لم نجدها قبل السعر (بسبب قلب النصوص)، نبحث بعدها
+        if qty is None:
+            for idx in range(price_idx + 1, len(raw_nums)):
+                if '.' not in raw_nums[idx][0] and raw_nums[idx][1] not in sku_nums:
+                    qty = raw_nums[idx][1]
+                    break
+                    
+        # 3. احتياطي
+        if qty is None:
+            qty = raw_nums[price_idx - 1][1] if price_idx > 0 else raw_nums[0][1]
             
-            # 💡 نختار الرقم الصحيح الذي يسبق السعر مباشرة ليكون هو الكمية
-            possible_qtys_before = [t for t in integers if t[0] < price_idx]
-            if possible_qtys_before:
-                qty = possible_qtys_before[-1][2]
-            else:
-                # إذا لم يكن هناك رقم قبله (بسبب قلب النصوص في الـ OCR)، نأخذ الذي بعده
-                possible_qtys_after = [t for t in integers if t[0] > price_idx]
-                if possible_qtys_after:
-                    qty = possible_qtys_after[0][2]
-                elif integers:
-                    qty = integers[0][2]
+    else:
+        # في حال لم يقرأ الـ OCR النقطة العشرية بالكامل
+        if len(raw_nums) >= 2:
+            qty = raw_nums[-2][1]
+            unit_price = raw_nums[-1][1]
         else:
-            # احتياطي أخير إذا اختفت العلامات العشرية تماماً
-            if len(integers) >= 2:
-                qty = integers[-2][2]
-                unit_price = integers[-1][2]
-            elif nums:
-                qty = nums[0][1]
-                unit_price = nums[0][1]
+            qty = raw_nums[0][1]
+            unit_price = raw_nums[0][1]
 
-    # تحويل الكمية إلى رقم صحيح نظيف
+    # تحويل الكمية إلى عدد صحيح (مثال: 200.0 تصبح 200)
     if qty is not None:
         try:
             qty = int(qty) if float(qty).is_integer() else qty
@@ -400,7 +384,7 @@ def process_pdf(pdf_path):
     if not items:
         items =[{"Unit price": None, "Quantity": None, "Description": "", "SKU": ""}]
 
-    rows = [{**meta, **item} for item in items]
+    rows =[{**meta, **item} for item in items]
     return pd.DataFrame(rows).reindex(columns=FINAL_COLS), mode, text
 
 # =====================
@@ -450,11 +434,34 @@ if uploaded_files:
                 ).dt.strftime("%m/%d/%Y")
 
             st.success(f"✅ Done! {len(final_df)} total row(s)")
-            st.dataframe(final_df)
+            
+            # 💡 عرض البيانات في الموقع مع تثبيت العلامة العشرية (18.00)
+            money_cols =["Balance", "Paid", "Total before tax", "VAT 15%", "Total after tax", "Unit price"]
+            format_dict = {c: "{:.2f}" for c in money_cols if c in final_df.columns}
+            st.dataframe(final_df.style.format(format_dict, na_rep=""))
 
+            # 💡 تحميل ملف الإكسيل مع إجبار الإكسيل على كتابة (.00)
             out = BytesIO()
-            final_df.to_excel(out, index=False, engine="openpyxl")
+            writer = pd.ExcelWriter(out, engine='openpyxl')
+            final_df.to_excel(writer, index=False, sheet_name='Invoices')
+            
+            workbook = writer.book
+            worksheet = writer.sheets['Invoices']
+            
+            col_indices =[final_df.columns.get_loc(c) + 1 for c in money_cols if c in final_df.columns]
+            
+            for row in range(2, len(final_df) + 2):
+                for col_idx in col_indices:
+                    cell = worksheet.cell(row=row, column=col_idx)
+                    try:
+                        if cell.value is not None:
+                            cell.value = float(cell.value)
+                            cell.number_format = '#,##0.00'
+                    except: pass
+                    
+            writer.close()
             out.seek(0)
+            
             st.download_button(
                 "📥 Download Excel",
                 out,
