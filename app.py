@@ -52,17 +52,10 @@ FINAL_COLS =[
     "Source File",
 ]
 
-SKU_TO_DESC = {
-    "فيل ليج هندي صاحبة": "VEAL LEG SAHIBA",
-    "فيل ليج هندي": "VEAL LEG HINDI",
-    "فيل ليج": "VEAL LEG",
-    "فوركوارتر هندي": "FOREQUARTER HINDI",
-    "فوركوارتر": "FOREQUARTER",
-}
-
-# 💡 قاموس التصحيح التلقائي لحل مشكلة الـ OCR في الفاتورة الثالثة وتوحيد الاسم
+# قاموس لتصحيح أخطاء الـ OCR الطفيفة
 SKU_CORRECTIONS = {
     "فيل ليج هندي صاحبة 18 (510)": "فيل ليج هندي صاحبة 18 ك (510)",
+    "فيل ليج هندي الفاروق 18": "فيل ليج هندي الفاروق 18 ك",
 }
 
 def clean_sku(raw_sku):
@@ -82,10 +75,10 @@ def extract_sku_from_line(line):
             raw = raw + " " + b_clean
             
     sku = clean_sku(raw)
-    # تطبيق التصحيح
     for wrong, correct in SKU_CORRECTIONS.items():
         if sku == wrong or wrong in sku:
             sku = correct
+            break
             
     return sku
 
@@ -108,7 +101,7 @@ def get_text(pdf_path):
     with fitz.open(pdf_path) as doc:
         for page in doc:
             pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            img = Image.frombytes("RGB",[pix.width, pix.height], pix.samples)
             ocr_text += pytesseract.image_to_string(img, lang="ara+eng", config="--psm 6") + "\n"
     return ocr_text, "ocr"
 
@@ -120,7 +113,7 @@ def get_ocr_words(pdf_path):
     except Exception:
         with fitz.open(pdf_path) as doc:
             pix = doc[0].get_pixmap(matrix=fitz.Matrix(3, 3))
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        img = Image.frombytes("RGB",[pix.width, pix.height], pix.samples)
     data = pytesseract.image_to_data(
         img, lang="ara+eng", config="--psm 6",
         output_type=pytesseract.Output.DATAFRAME,
@@ -130,7 +123,7 @@ def get_ocr_words(pdf_path):
     return data
 
 def reconstruct_table_rows(word_df, y_tolerance=15):
-    if word_df.empty: return []
+    if word_df.empty: return[]
     word_df = word_df.copy()
     word_df["mid_y"] = word_df["top"] + word_df["height"] / 2
     rows =[]
@@ -190,82 +183,73 @@ def parse_item_line(line, tb_val=0.0):
     if row_total and row_total > 0: targets.append(row_total)
     if tb_val and tb_val > 0: targets.append(tb_val)
 
-    # 💡 خوارزمية ذكية لاستخراج العدد والسعر (تعرف السعر من العلامة العشرية)
+    # 1. الاستخراج الذكي بالضرب الرياضي
     for target in targets:
         for i, v1 in enumerate(cand_floats):
             for j, v2 in enumerate(cand_floats):
                 if i >= j: continue
                 if abs(v1 * v2 - target) / target < 0.05:
-                    leftovers =[v for idx, v in enumerate(cand_floats) if idx not in (i, j)]
-                    if leftovers:
-                        qty = leftovers[0]
-                        s1, s2 = valid_strs[i], valid_strs[j]
-                        # الرقم الذي يحتوى على فاصلة عشرية هو السعر
-                        if '.' in s1 and '.' not in s2:
-                            unit_price = v1
-                        elif '.' in s2 and '.' not in s1:
-                            unit_price = v2
-                        else:
-                            unit_price = min(v1, v2)
+                    has_frac1 = not float(v1).is_integer()
+                    has_frac2 = not float(v2).is_integer()
+                    
+                    if has_frac1 or has_frac2:
+                        leftovers =[v for idx, v in enumerate(cand_floats) if idx not in (i, j)]
+                        
+                        # فلترة ذكية لرفض الرقم 18 ككمية إذا كان هناك كمية أوضح (مثل 49)
+                        ints =[v for v in leftovers if float(v).is_integer()]
+                        if len(ints) > 1 and 18 in ints:
+                            ints = [v for v in ints if v != 18]
+                            
+                        qty = max(ints) if ints else leftovers[0] if leftovers else None
+                        unit_price = v1 if has_frac1 and not has_frac2 else v2 if has_frac2 and not has_frac1 else min(v1, v2)
                     else:
-                        s1, s2 = valid_strs[i], valid_strs[j]
-                        if float(v1).is_integer() and not float(v2).is_integer():
-                            qty, unit_price = v1, v2
-                        elif float(v2).is_integer() and not float(v1).is_integer():
-                            qty, unit_price = v2, v1
-                        else:
-                            if '.' in s1 and '.' not in s2:
-                                qty, unit_price = v2, v1
-                            elif '.' in s2 and '.' not in s1:
-                                qty, unit_price = v1, v2
-                            else:
-                                qty, unit_price = min(v1, v2), max(v1, v2)
+                        qty = min(v1, v2)
+                        unit_price = max(v1, v2)
                     matched = True
                     break
             if matched: break
         if matched: break
 
-    # حالة احتياطية (Fallback)
+    # 2. الاستخراج في حال فشل الضرب (مثل الفاتورة 2567)
     if not matched:
-        has_dot =[idx for idx, s in enumerate(valid_strs) if '.' in s]
-        if len(has_dot) == 1:
-            unit_price = cand_floats[has_dot[0]]
-            others =[v for idx, v in enumerate(cand_floats) if idx != has_dot[0]]
-            qty = max(others) if others else unit_price
+        has_dot_idx =[idx for idx, s in enumerate(valid_strs) if '.' in s]
+        no_dot_idx =[idx for idx, s in enumerate(valid_strs) if '.' not in s]
+        
+        if has_dot_idx and no_dot_idx:
+            unit_price = cand_floats[has_dot_idx[0]]
+            
+            # تجاهل رقم 18 ككمية إذا وجدنا كمية أخرى (مثل 200)
+            possible_qtys = [cand_floats[idx] for idx in no_dot_idx]
+            if len(possible_qtys) > 1 and 18 in possible_qtys:
+                possible_qtys = [q for q in possible_qtys if q != 18]
+                
+            qty = max(possible_qtys) if possible_qtys else cand_floats[no_dot_idx[0]]
+            
         elif len(cand_floats) >= 2:
-            qty = cand_floats[0]
-            unit_price = cand_floats[1]
+            qty = min(cand_floats[0], cand_floats[1])
+            unit_price = max(cand_floats[0], cand_floats[1])
         elif cand_floats:
             qty = cand_floats[0]
             unit_price = cand_floats[0]
 
+    # تحويل الكمية لعدد صحيح نظيف
     if qty is not None:
         try:
             qty = int(qty) if float(qty).is_integer() else qty
         except:
             pass
 
+    # استخراج الكلمات الإنجليزية بذكاء
     all_eng = re.findall(r"[A-Za-z]{2,}", line)
-    desc_words =[w for w in all_eng if len(w) >= 4 or w.isupper()]
+    desc_words =[w for w in all_eng if len(w) >= 3 or w.isupper()]
     seen_w, deduped = set(),[]
     for w in desc_words:
         if w.upper() not in seen_w:
             seen_w.add(w.upper())
             deduped.append(w)
     desc = " ".join(deduped).strip()
+    
     sku = extract_sku_from_line(line)
-
-    if sku and desc:
-        for ar_key, en_val in SKU_TO_DESC.items():
-            if ar_key in sku:
-                dwords = desc.upper().split()
-                if all(w in en_val.upper() for w in dwords) and desc.upper() != en_val.upper(): desc = en_val
-                break
-    elif sku and not desc:
-        for ar_key, en_val in SKU_TO_DESC.items():
-            if ar_key in sku:
-                desc = en_val
-                break
 
     if not (sku or desc): return None
     return {"SKU": sku, "Description": desc, "Quantity": qty, "Unit price": unit_price}
@@ -328,9 +312,9 @@ def extract_items_native(pdf_path, tb_val):
                 for table in (page.extract_tables() or[]):
                     for row in table:
                         if not row: continue
-                        vals = [str(c).strip() if c else "" for c in row]
+                        vals =[str(c).strip() if c else "" for c in row]
                         if is_summary_row(vals): continue
-                        num_cells = [v for v in vals if re.sub(r"[,.\s]", "", v).isdigit() and 1 <= len(re.sub(r"[,.\s]", "", v)) <= 8]
+                        num_cells =[v for v in vals if re.sub(r"[,.\s]", "", v).isdigit() and 1 <= len(re.sub(r"[,.\s]", "", v)) <= 8]
                         if len(num_cells) < 2: continue
                         
                         raw_sku  = reshape(vals[5]) if len(vals) > 5 else ""
@@ -340,6 +324,7 @@ def extract_items_native(pdf_path, tb_val):
                         for wrong, correct in SKU_CORRECTIONS.items():
                             if sku == wrong or wrong in sku:
                                 sku = correct
+                                break
 
                         items.append({
                             "Unit price": clean_number(vals[2]) if len(vals) > 2 else None,
@@ -458,11 +443,11 @@ def process_pdf(pdf_path):
         if m_fname_inv:
             meta["Invoice Number"] = m_fname_inv.group(1)
 
-    # 💡 تم إلغاء نظام الحذف هنا ليظهر كل منتج في سطر منفصل مهما تطابقت الأرقام
+    # 💡 تم مسح نظام الحذف تماماً، الكود سيستخرج كل السطور كما هي بدون حذف
     if not items:
         items =[{"Unit price": None, "Quantity": None, "Description": "", "SKU": ""}]
 
-    rows = [{**meta, **item} for item in items]
+    rows =[{**meta, **item} for item in items]
     return pd.DataFrame(rows).reindex(columns=FINAL_COLS), mode, text
 
 # =====================
