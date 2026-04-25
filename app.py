@@ -1,140 +1,111 @@
-# streamlit_app.py
-
 import streamlit as st
-import fitz
+import pdfplumber
+import fitz  # PyMuPDF
 import pandas as pd
-import re
 import tempfile
-import zipfile
-from pathlib import Path
+import re
 from io import BytesIO
 
-import pytesseract
-from pdf2image import convert_from_path
+# Optional Arabic support
+try:
+    import arabic_reshaper
+    from bidi.algorithm import get_display
 
-# =========================
-# OCR FUNCTION
-# =========================
+    def reshape(text):
+        try:
+            return get_display(arabic_reshaper.reshape(text))
+        except:
+            return text
+except:
+    def reshape(text):
+        return text
 
-def ocr_pdf(pdf_path):
-    images = convert_from_path(pdf_path, dpi=400)
-    text = ""
 
-    for img in images:
-        text += pytesseract.image_to_string(
-            img,
-            lang="ara",
-            config="--oem 3 --psm 6"
-        ) + "\n"
+# ----------------------------
+# Extract text from PDF page
+# ----------------------------
+def extract_text_from_page(page):
+    text = page.extract_text()
+    if text:
+        return text
 
-    return text
+    # OCR fallback using image rendering
+    pix = page.to_pixmap()
+    img_bytes = pix.tobytes("png")
 
-# =========================
-# CLEAN TEXT
-# =========================
+    try:
+        from PIL import Image
+        import pytesseract
 
-def clean_text(text):
-    text = text.replace("\n", " ")
-    text = re.sub(r"\s+", " ", text)
-    return text
+        img = Image.open(BytesIO(img_bytes))
+        text = pytesseract.image_to_string(img)
+        return text
+    except:
+        return ""
 
-# =========================
-# SMART EXTRACTION 🔥
-# =========================
 
-def extract_data(text):
+# ----------------------------
+# Process PDF
+# ----------------------------
+def process_pdf(pdf_file):
+    all_data = []
 
-    data = {}
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(pdf_file.read())
+        tmp_path = tmp.name
 
-    # 🔥 Invoice Number
-    inv = re.search(r"رقم الفاتورة\s*[:\-]?\s*(\d+)", text)
-    if not inv:
-        inv = re.search(r"\b0?\d{4,5}\b", text)
-    data["Invoice Number"] = inv.group(1) if inv else ""
+    doc = fitz.open(tmp_path)
 
-    # 🔥 Date
-    date = re.search(r"\d{2}/\d{2}/\d{4}", text)
-    data["Invoice Date"] = date.group(0) if date else ""
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        text = extract_text_from_page(page)
 
-    # 🔥 Customer Name
-    cust = re.search(r"مؤسسة\s+[^\d]+", text)
-    if not cust:
-        cust = re.search(r"شركة\s+[^\d]+", text)
-    data["Customer Name"] = cust.group(0).strip() if cust else ""
+        if not text:
+            continue
 
-    # 🔥 Address
-    addr = re.search(r"(حي\s+[^\d]+جدة)", text)
-    data["Address"] = addr.group(0) if addr else ""
+        text = reshape(text)
 
-    # 🔥 Tax Number (very reliable)
-    tax = re.search(r"\b3\d{14}\b", text)
-    data["Tax Number"] = tax.group(0) if tax else ""
+        # Clean lines
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
 
-    # 🔥 Paid / Balance
-    paid = re.search(r"مدفوع\s*(\d+)", text)
-    data["Paid"] = paid.group(1) if paid else "0"
+        for line in lines:
+            # simple split logic (you can customize later)
+            cols = re.split(r"\s{2,}", line)
+            all_data.append(cols)
 
-    balance = re.search(r"الرصيد المستحق\s*(\d+)", text)
-    data["Balance"] = balance.group(1) if balance else "0"
+    # Normalize rows length
+    max_len = max((len(row) for row in all_data), default=0)
+    cleaned = [row + [""] * (max_len - len(row)) for row in all_data]
 
-    return data
+    df = pd.DataFrame(cleaned)
+    return df
 
-# =========================
-# PROCESS
-# =========================
 
-def process_pdf(pdf_path):
-    text = ocr_pdf(pdf_path)
-    text = clean_text(text)
+# ----------------------------
+# Streamlit UI
+# ----------------------------
+st.set_page_config(page_title="PDF to Excel OCR", layout="wide")
 
-    # 👇 DEBUG (important)
-    st.text_area("🔍 OCR TEXT", text[:1500], height=200)
+st.title("📄 PDF to Excel Converter (OCR + Arabic Support)")
 
-    data = extract_data(text)
-    data["Source File"] = pdf_path.name
+uploaded_file = st.file_uploader("Upload your PDF", type=["pdf"])
 
-    return pd.DataFrame([data])
+if uploaded_file:
+    with st.spinner("Processing PDF..."):
+        df = process_pdf(uploaded_file)
 
-# =========================
-# UI
-# =========================
+    st.success("Done!")
 
-st.set_page_config(layout="wide")
-st.title("📄 Arabic Invoice Extractor (Accurate Version)")
+    st.dataframe(df)
 
-files = st.file_uploader("Upload PDF or ZIP", type=["pdf", "zip"], accept_multiple_files=True)
+    # Download Excel
+    output = BytesIO()
+    df.to_excel(output, index=False, engine="openpyxl")
+    output.seek(0)
 
-if files:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_dir = Path(temp_dir)
-        pdfs = []
-
-        for f in files:
-            path = temp_dir / f.name
-            with open(path, "wb") as file:
-                file.write(f.read())
-
-            if f.name.endswith(".zip"):
-                with zipfile.ZipFile(path, 'r') as zip_ref:
-                    zip_ref.extractall(temp_dir)
-                pdfs.extend(temp_dir.glob("*.pdf"))
-            else:
-                pdfs.append(path)
-
-        all_data = []
-
-        for pdf in pdfs:
-            st.write(f"📄 Processing: {pdf.name}")
-            df = process_pdf(pdf)
-            all_data.append(df)
-
-        final_df = pd.concat(all_data, ignore_index=True)
-
-        st.success("✅ Extraction complete")
-        st.dataframe(final_df)
-
-        output = BytesIO()
-        final_df.to_excel(output, index=False)
-        output.seek(0)
-
-        st.download_button("📥 Download Excel", data=output, file_name="invoices.xlsx")
+    st.download_button(
+        label="📥 Download Excel",
+        data=output,
+        file_name="output.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
