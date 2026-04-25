@@ -1,89 +1,59 @@
 import streamlit as st
-import pdfplumber
 import tempfile
-import pandas as pd
 from pdf2image import convert_from_path
 import pytesseract
-from io import BytesIO
 
 
 # -----------------------------
-# OCR + TEXT EXTRACTION
+# OCR FUNCTION (CLEAN OUTPUT)
 # -----------------------------
-def extract_text(pdf_path):
-    text = ""
+def pdf_to_clean_text(pdf_path):
+    images = convert_from_path(pdf_path, dpi=300)
 
-    # 1. Try normal text extraction
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages:
-                t = page.extract_text()
-                if t:
-                    text += t + "\n"
-    except:
-        pass
+    full_text = []
 
-    # 2. If empty → OCR
-    if not text.strip():
-        images = convert_from_path(pdf_path)
-        for img in images:
-            text += pytesseract.image_to_string(img) + "\n"
+    for img in images:
+        # better OCR config for readable text
+        custom_config = r'--oem 3 --psm 6'
 
-    return text
+        text = pytesseract.image_to_string(img, config=custom_config)
 
+        # CLEANING STEP
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        clean_page = "\n".join(lines)
 
-# -----------------------------
-# PROCESS PDF
-# -----------------------------
-def process_pdf(file):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(file.read())
-        pdf_path = tmp.name
+        full_text.append(clean_page)
 
-    text = extract_text(pdf_path)
-
-    if not text.strip():
-        return pd.DataFrame()
-
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-    data = [l.split() for l in lines]
-
-    if not data:
-        return pd.DataFrame()
-
-    max_len = max(len(r) for r in data)
-    data = [r + [""] * (max_len - len(r)) for r in data]
-
-    return pd.DataFrame(data)
+    return "\n\n".join(full_text)
 
 
 # -----------------------------
 # STREAMLIT UI
 # -----------------------------
-st.set_page_config(page_title="PDF OCR to Excel", layout="wide")
+st.set_page_config(page_title="PDF OCR Text Cleaner", layout="wide")
 
-st.title("📄 PDF → Excel Converter (OCR + Smart Mode)")
+st.title("📄 PDF → Clean Readable Text (OCR)")
 
 uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
 
 if uploaded_file:
-    with st.spinner("Processing..."):
-        df = process_pdf(uploaded_file)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(uploaded_file.read())
+        path = tmp.name
 
-    if df.empty:
-        st.error("No data found 😢 (PDF might be encrypted or image-only with poor OCR)")
+    with st.spinner("Extracting clean text with OCR..."):
+        text = pdf_to_clean_text(path)
+
+    if not text.strip():
+        st.error("No readable text found 😢")
     else:
         st.success("Done!")
 
-        st.dataframe(df)
-
-        output = BytesIO()
-        df.to_excel(output, index=False, engine="openpyxl")
-        output.seek(0)
+        st.text_area("📜 Clean OCR Text", text, height=500)
 
         st.download_button(
-            "📥 Download Excel",
-            data=output,
-            file_name="output.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            "📥 Download Text",
+            text,
+            file_name="ocr_text.txt",
+            mime="text/plain"
         )
