@@ -1,97 +1,79 @@
 import streamlit as st
-import tempfile
+import pandas as pd
 import re
-from pdf2image import convert_from_path
-import pytesseract
 
 
 # -----------------------------
-# ADVANCED CLEANING ENGINE
+# CLEAN FUNCTION
 # -----------------------------
-def is_noise(line):
-    line = line.strip()
+def clean_cell(text):
+    if not text:
+        return ""
 
-    # remove tiny garbage
-    if len(line) < 3:
-        return True
+    # fix Arabic encoding noise
+    text = re.sub(r'[^\w\s\u0600-\u06FF%:.,()/\-\+\"]', ' ', text)
 
-    # only numbers / symbols
-    if re.fullmatch(r'[\d\s\-\.:,%()+]+', line):
-        return True
+    # normalize spaces
+    text = re.sub(r'\s+', ' ', text).strip()
 
-    # OCR garbage patterns
-    garbage_words = ["ee", "ae", "ob", "fay", "cece", "rates", "ta", "crs"]
-
-    if any(g in line.lower() for g in garbage_words):
-        if len(line.split()) < 5:
-            return True
-
-    return False
-
-
-def clean_line(line):
-    line = re.sub(r'[^\w\s\u0600-\u06FF%:.,()/\-\+]', ' ', line)
-    line = re.sub(r'\s+', ' ', line).strip()
-    return line
+    return text
 
 
 # -----------------------------
-# SMART OCR
+# PARSE ROWS (TAB / OCR OUTPUT)
 # -----------------------------
-def extract_text(pdf_path):
-    images = convert_from_path(pdf_path, dpi=400)
-    config = r'--oem 3 --psm 6 -l ara+eng'
+def parse_data(raw_text):
+    rows = []
 
-    all_clean = []
+    for line in raw_text.split("\n"):
+        line = line.strip()
 
-    for img in images:
-        text = pytesseract.image_to_string(img, config=config)
+        if not line:
+            continue
 
-        lines = text.split("\n")
+        # split by tabs OR multiple spaces
+        cols = re.split(r'\t+|\s{2,}', line)
 
-        for line in lines:
-            line = clean_line(line)
+        cols = [clean_cell(c) for c in cols if c.strip()]
 
-            if not line:
-                continue
+        if len(cols) >= 5:  # filter valid rows only
+            rows.append(cols)
 
-            if is_noise(line):
-                continue
-
-            all_clean.append(line)
-
-    return "\n".join(all_clean)
+    return rows
 
 
 # -----------------------------
 # STREAMLIT UI
 # -----------------------------
-st.set_page_config(page_title="AI Invoice Cleaner", layout="wide")
+st.set_page_config(page_title="Structured Invoice Cleaner", layout="wide")
 
-st.title("📄 AI Invoice OCR Cleaner (Production Level)")
+st.title("📊 OCR → Structured Invoice Table")
 
-file = st.file_uploader("Upload PDF Invoice", type=["pdf"])
+input_text = st.text_area("Paste OCR raw data here", height=300)
 
-if file:
+if input_text:
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(file.read())
-        path = tmp.name
+    data = parse_data(input_text)
 
-    with st.spinner("Processing invoice..."):
-
-        result = extract_text(path)
-
-    if not result.strip():
-        st.error("No usable text found 😢")
+    if not data:
+        st.error("No structured data found 😢")
     else:
-        st.success("Invoice cleaned successfully ✅")
+        # normalize columns length
+        max_len = max(len(r) for r in data)
+        data = [r + [""] * (max_len - len(r)) for r in data]
 
-        st.text_area("📜 Clean Invoice Output", result, height=500)
+        df = pd.DataFrame(data)
+
+        st.success("Structured table created ✅")
+
+        st.dataframe(df)
+
+        # download excel
+        excel = df.to_excel(index=False, engine="openpyxl")
 
         st.download_button(
-            "📥 Download Clean Invoice",
-            result,
-            file_name="clean_invoice.txt",
-            mime="text/plain"
+            "📥 Download Excel",
+            data=open,
+            file_name="structured_invoice.xlsx"
         )
+        
