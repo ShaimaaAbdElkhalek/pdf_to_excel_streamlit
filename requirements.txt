@@ -1,10 +1,9 @@
 streamlit
-pymupdf
 pdfplumber
+pymupdf
 pandas
+openpyxl
+pillow
+pytesseract
 arabic-reshaper
 python-bidi
-pytesseract
-pdf2image
-opencv-python-headless
-Pillow
