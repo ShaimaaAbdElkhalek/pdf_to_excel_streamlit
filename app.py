@@ -21,7 +21,6 @@ def reshape(text):
 def clean_number(val):
     s = re.sub(r"[^\d.]", "", str(val).replace(",", "").replace("\u066c", "").replace("\u066b", "."))
     try:
-        # منع قراءة الآيبان أو أرقام الحسابات كقيم مالية
         if len(s.split('.')[0]) > 10:
             return None
         return float(s) if s else None
@@ -41,19 +40,20 @@ UNIT_WORDS = {
     "جرام", "مل", "حبة", "رول", "باكيت", "صندوق",
 }
 
-HEADER_KW = ["البند", "الوصف", "العدد", "سعر الوحدة", "الكمية", "الوحدة"]
+HEADER_KW =["البند", "الوصف", "العدد", "سعر الوحدة", "الكمية", "الوحدة"]
 
-SUMMARY_KW = [
+SUMMARY_KW =[
     "المجموع", "مدفوع", "الرصيد", "القيمة", "القيمه", "الإجمالي", "الإحمالي", "اإلجمالي", "الاجمالي",
     "رقم الحساب", "الايبان", "IBAN", "SA08", "Kingdome", "المملكة",
     "رقم الفاتورة", "تاريخ", "اسم العميل", "الرقم الضريبي", "رقم السجل", "العنوان", "الجوال", "السجل التجاري", "مرتجع",
 ]
 
-FINAL_COLS = [
+# تم إضافة عمود Weight لفصل الوزن عن العدد
+FINAL_COLS =[
     "Invoice Number", "Invoice Date", "Customer Name",
     "Address", "Balance", "Paid",
     "Total before tax", "VAT 15%", "Total after tax",
-    "Unit price", "Quantity", "Description", "SKU",
+    "Unit price", "Quantity", "Weight", "Description", "SKU",
     "Source File",
 ]
 
@@ -67,7 +67,7 @@ SKU_TO_DESC = {
 
 def clean_sku(raw_sku):
     cleaned = re.sub(r"\|", " ", raw_sku)
-    words = [w for w in cleaned.split() if w not in UNIT_WORDS and (len(w) > 1 or w == "ك")]
+    words =[w for w in cleaned.split() if w not in UNIT_WORDS and (len(w) > 1 or w == "ك")]
     return " ".join(words).strip()
 
 def extract_sku_from_line(line):
@@ -101,7 +101,7 @@ def get_text(pdf_path):
     with fitz.open(pdf_path) as doc:
         for page in doc:
             pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            img = Image.frombytes("RGB",[pix.width, pix.height], pix.samples)
             ocr_text += pytesseract.image_to_string(img, lang="ara+eng", config="--psm 6") + "\n"
     return ocr_text, "ocr"
 
@@ -113,7 +113,7 @@ def get_ocr_words(pdf_path):
     except Exception:
         with fitz.open(pdf_path) as doc:
             pix = doc[0].get_pixmap(matrix=fitz.Matrix(3, 3))
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        img = Image.frombytes("RGB",[pix.width, pix.height], pix.samples)
     data = pytesseract.image_to_data(
         img, lang="ara+eng", config="--psm 6",
         output_type=pytesseract.Output.DATAFRAME,
@@ -123,10 +123,10 @@ def get_ocr_words(pdf_path):
     return data
 
 def reconstruct_table_rows(word_df, y_tolerance=15):
-    if word_df.empty: return []
+    if word_df.empty: return[]
     word_df = word_df.copy()
     word_df["mid_y"] = word_df["top"] + word_df["height"] / 2
-    rows = []
+    rows =[]
     used = set()
     for idx, word in word_df.iterrows():
         if idx in used: continue
@@ -172,35 +172,51 @@ def parse_item_line(line):
 
     if not candidates: return None
 
-    first_whole   = next((clean_number(n) for n in candidates if "." not in str(n) and clean_number(n)), None)
-    first_decimal = next((clean_number(n) for n in candidates if "." in str(n)), None)
-    qty = first_whole
-    unit_price = first_decimal
+    qty = None       # العدد (الكراتين)
+    weight = None    # الوزن (الكيلو)
+    unit_price = None
+    
+    cand_vals =[clean_number(n) for n in candidates if clean_number(n)]
+    matched = False
 
-    if row_total and qty and unit_price:
-        if abs(qty * unit_price - row_total) / row_total > 0.05:
-            cand_vals = [clean_number(n) for n in candidates if clean_number(n)]
-            best_diff = float("inf")
-            for i, v1 in enumerate(cand_vals):
-                for j, v2 in enumerate(cand_vals):
-                    if i == j: continue
-                    if row_total > 0 and abs(v1 * v2 - row_total) / row_total < 0.05:
-                        diff = abs(v1 * v2 - row_total)
-                        if diff < best_diff:
-                            best_diff = diff
-                            if i < j: qty, unit_price = v1, v2
-                            else: qty, unit_price = v2, v1
+    # خوارزمية رياضية للتعرف على العدد والوزن والسعر
+    if row_total and row_total > 0:
+        for i, v1 in enumerate(cand_vals):
+            for j, v2 in enumerate(cand_vals):
+                if i == j: continue
+                # نبحث عن الرقمين اللذين حاصل ضربهما يساوي المجموع (مع هامش خطأ بسيط)
+                if abs(v1 * v2 - row_total) / row_total < 0.05:
+                    leftovers =[v for idx, v in enumerate(cand_vals) if idx not in (i, j)]
 
-    if unit_price is None:
-        vals = sorted([clean_number(n) for n in candidates if clean_number(n)])
-        if len(vals) >= 2:
-            qty, unit_price = vals[0], vals[-1]
-        elif vals:
-            unit_price = vals[0]
+                    if leftovers:
+                        # في حال وجود 3 أرقام (العدد، الوزن، السعر)
+                        qty = leftovers[0]             # الرقم المتبقي هو العدد!
+                        weight = max(v1, v2)           # الوزن غالباً يكون الأكبر
+                        unit_price = min(v1, v2)       # السعر غالباً يكون الأصغر
+                    else:
+                        # في حال وجود رقمين فقط (العدد، السعر) بدون وزن
+                        if i < j:
+                            qty, unit_price = v1, v2
+                        else:
+                            qty, unit_price = v2, v1
+                            
+                    matched = True
+                    break
+            if matched: break
+
+    # في حال فشل المعادلة، نوزع الأرقام بناءً على الترتيب
+    if not matched:
+        if len(cand_vals) >= 2:
+            qty = cand_vals[0]
+            unit_price = cand_vals[1]
+            if len(cand_vals) >= 3:
+                weight = cand_vals[2]
+        elif len(cand_vals) == 1:
+            unit_price = cand_vals[0]
 
     all_eng = re.findall(r"[A-Za-z]{2,}", line)
-    desc_words = [w for w in all_eng if len(w) >= 4 or w.isupper()]
-    seen_w, deduped = set(), []
+    desc_words =[w for w in all_eng if len(w) >= 4 or w.isupper()]
+    seen_w, deduped = set(),[]
     for w in desc_words:
         if w.upper() not in seen_w:
             seen_w.add(w.upper())
@@ -221,10 +237,10 @@ def parse_item_line(line):
                 break
 
     if not (sku or desc): return None
-    return {"SKU": sku, "Description": desc, "Quantity": qty, "Unit price": unit_price}
+    return {"SKU": sku, "Description": desc, "Quantity": qty, "Weight": weight, "Unit price": unit_price}
 
 def extract_items_positional(word_df, text):
-    items = []
+    items =[]
     if not word_df.empty:
         rows = reconstruct_table_rows(word_df)
         header_idx, summary_idx = None, None
@@ -263,14 +279,14 @@ def is_summary_row(vals):
     return any(kw in " ".join(vals) for kw in SUMMARY_KW)
 
 def extract_items_native(pdf_path):
-    items = []
+    items =[]
     try:
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
                 for table in (page.extract_tables() or []):
                     for row in table:
                         if not row: continue
-                        vals = [str(c).strip() if c else "" for c in row]
+                        vals =[str(c).strip() if c else "" for c in row]
                         if is_summary_row(vals): continue
                         num_cells = [v for v in vals if re.sub(r"[,.\s]", "", v).isdigit() and 1 <= len(re.sub(r"[,.\s]", "", v)) <= 8]
                         if len(num_cells) < 2: continue
@@ -279,6 +295,7 @@ def extract_items_native(pdf_path):
                         items.append({
                             "Unit price": clean_number(vals[2]) if len(vals) > 2 else None,
                             "Quantity": clean_number(vals[3]) if len(vals) > 3 else None,
+                            "Weight": None,
                             "Description": raw_desc,
                             "SKU": clean_sku(raw_sku),
                         })
@@ -286,37 +303,32 @@ def extract_items_native(pdf_path):
     return items
 
 def extract_metadata(pdf_path, text):
-    # 1. Customer Name (الاعتماد الأساسي سيكون على اسم الملف لاحقاً)
     cname = ""
     m_name = re.search(r'اسم العميل\s*:\s*(.*?)(?=رقم|التاريخ|الرقم|\n)', text)
     if m_name:
         cname = m_name.group(1).strip()
         cname = re.sub(r'الغاتورة.*|الفاتورة.*|الفغاتورة.*|إلى.*', '', cname).strip()
 
-    # 2. Invoice Number
     inv_num = ""
     m_inv = re.search(r'رقم\s*(?:ال[غف]اتورة|الفغاتورة|فاتورة)\s*[:\-]?\s*(\d{4,6})', text)
     if not m_inv:
         m_inv = re.search(r'رقم.*?\s+(\d{4,6})\b', text)
     if m_inv: inv_num = m_inv.group(1).strip()
 
-    # 3. Invoice Date
     inv_date = ""
     m_date = re.search(r'تاريخ.*?\s+(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})', text)
     if m_date: inv_date = m_date.group(1).strip()
 
-    # 4. Address
     address = ""
     m_add = re.search(r'العنوان\s*:\s*(.+?)(?=\n\s*05|\n\s*\d{10}|\n\s*البند|\n\s*المجموع|05\d{8})', text, re.DOTALL)
     if m_add:
         address = m_add.group(1).replace('\n', ' ').strip()
         address = re.sub(r'\s*\d{10}\s*$', '', address).strip()
 
-    # 5. Financials (التصحيح الرياضي التلقائي)
     tb = ta = vat = paid = bal = 0.0
 
-    safe_text = re.sub(r'SA\d{22}', '', text) # حذف الآيبان
-    safe_text = re.sub(r'\b\d{12,}\b', '', safe_text) # حذف أرقام الحسابات الطويلة
+    safe_text = re.sub(r'SA\d{22}', '', text)
+    safe_text = re.sub(r'\b\d{12,}\b', '', safe_text)
 
     m_tot = re.search(r'الإ[جح]مالي\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
     if m_tot: ta = clean_number(m_tot.group(1))
@@ -327,12 +339,10 @@ def extract_metadata(pdf_path, text):
     m_vat = re.search(r'(?:القيمة المضافة|المضافة|15%)\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
     if m_vat: vat = clean_number(m_vat.group(1))
 
-    # === MATH CORRECTION (تصحيح أخطاء الـ OCR بناءً على الضريبة 15٪) ===
     if ta:
         expected_tb = round(ta / 1.15, 2)
         expected_vat = round(ta - expected_tb, 2)
         
-        # إذا أخطأ البرنامج وقرأ المجموع 470000 بدلاً من 70000 سيقوم بتصحيحها تلقائياً
         if not tb or abs(tb - expected_tb) > 2:
             tb = expected_tb
             
@@ -372,19 +382,17 @@ def process_pdf(pdf_path):
         if not items:
             items = extract_items_positional(pd.DataFrame(), text)
 
-    # إجبار استخراج اسم العميل من اسم الملف لتجنب تقطيع الأحرف (مثل شركة لألأة النجوم)
     file_cname = extract_name_from_filename(pdf_path)
     if file_cname and len(file_cname) > 3:
         meta["Customer Name"] = file_cname
 
-    # إجبار استخراج رقم الفاتورة من اسم الملف في حال فشل الـ Regex
     if not meta["Invoice Number"]:
         m_fname_inv = re.search(r'(\d{4,6})', pdf_path.stem)
         if m_fname_inv:
             meta["Invoice Number"] = m_fname_inv.group(1)
 
     seen = set()
-    unique_items = []
+    unique_items =[]
     for item in items:
         key = (item.get("Description", ""), item.get("Unit price"), item.get("Quantity"))
         if key not in seen:
@@ -392,7 +400,7 @@ def process_pdf(pdf_path):
             unique_items.append(item)
 
     if not unique_items:
-        unique_items = [{"Unit price": None, "Quantity": None, "Description": "", "SKU": ""}]
+        unique_items =[{"Unit price": None, "Quantity": None, "Weight": None, "Description": "", "SKU": ""}]
 
     rows = [{**meta, **item} for item in unique_items]
     return pd.DataFrame(rows).reindex(columns=FINAL_COLS), mode, text
@@ -411,7 +419,7 @@ debug_mode = st.checkbox("🔍 Show full raw extracted text", value=False)
 if uploaded_files:
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
-        pdf_paths = []
+        pdf_paths =[]
 
         for uf in uploaded_files:
             fp = tmp / uf.name
@@ -423,7 +431,7 @@ if uploaded_files:
             else:
                 pdf_paths.append(fp)
 
-        all_data = []
+        all_data =[]
         for i, path in enumerate(pdf_paths):
             st.write(f"📄 **{path.name}**")
             with st.spinner("Extracting..."):
