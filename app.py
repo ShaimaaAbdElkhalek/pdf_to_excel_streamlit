@@ -42,10 +42,8 @@ UNIT_WORDS = {
 
 HEADER_KW =["البند", "الوصف", "العدد", "سعر الوحدة", "الكمية", "الوحدة"]
 
-# الكلمات التي تنهي قراءة المنتجات
 STOP_KWS =["المجموع", "القيمة المضافة", "الإجمالي", "الإحمالي", "اإلجمالي", "الاجمالي", "الرصيد", "الايبان", "رقم الحساب"]
 
-# الكلمات التي يتم تخطيها لمنع الأخطاء
 SKIP_KWS =["العنوان", "الضريبي", "السجل", "تاريخ", "العميل", "فاكس", "هاتف", "جوال", "إلى", "رقم الفاتورة", "رقم الغاتورة", "الفاتورة", "الغاتورة", "مدفوع", "مرتجع"]
 
 FINAL_COLS =[
@@ -100,7 +98,7 @@ def get_text(pdf_path):
     with fitz.open(pdf_path) as doc:
         for page in doc:
             pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
-            img = Image.frombytes("RGB",[pix.width, pix.height], pix.samples)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             ocr_text += pytesseract.image_to_string(img, lang="ara+eng", config="--psm 6") + "\n"
     return ocr_text, "ocr"
 
@@ -139,7 +137,7 @@ def reconstruct_table_rows(word_df, y_tolerance=15):
     return rows
 
 def get_nums(segment):
-    return [n for n in re.findall(r"[\d,]+\.?\d*", segment) if clean_number(n) not in (0, None) and len(re.sub(r"[,.]", "", n)) <= 8]
+    return[n for n in re.findall(r"[\d,]+\.?\d*", segment) if clean_number(n) not in (0, None) and len(re.sub(r"[,.]", "", n)) <= 8]
 
 def parse_item_line(line):
     eng_matches = list(re.finditer(r"[A-Za-z]{2,}", line))
@@ -165,7 +163,7 @@ def parse_item_line(line):
         candidates =[n for n in all_nums if n not in pack_bracket]
         row_total = None
     else:
-        candidates = [n for n in all_nums[:-1] if n not in pack_bracket]
+        candidates =[n for n in all_nums[:-1] if n not in pack_bracket]
         rt = clean_number(all_nums[-1])
         row_total = rt if rt and rt > 100 else None
 
@@ -174,36 +172,54 @@ def parse_item_line(line):
     qty = None
     unit_price = None
     
-    cand_vals =[clean_number(n) for n in candidates if clean_number(n)]
+    cand_vals = [clean_number(n) for n in candidates if clean_number(n)]
     matched = False
 
-    # 1. المحاولة الأولى: المطابقة الرياضية
+    # 1. الاستخراج الذكي: البحث عن السعر والعدد المتبقي
     if row_total and row_total > 0:
         for i, v1 in enumerate(cand_vals):
             for j, v2 in enumerate(cand_vals):
                 if i == j: continue
-                if abs(v1 * v2 - row_total) / row_total < 0.05:
-                    if i < j:
-                        qty, unit_price = v1, v2
+                if abs(v1 * v2 - row_total) / row_total < 0.05: # إذا ضربنا الوزن × السعر = المجموع
+                    leftovers =[v for idx, v in enumerate(cand_vals) if idx not in (i, j)]
+                    if leftovers:
+                        # الرقم المتبقي هو العدد (مثل 190 و 49)
+                        ints =[v for v in leftovers if float(v).is_integer()]
+                        qty = max(ints) if ints else leftovers[0]
+                        unit_price = min(v1, v2)
                     else:
-                        qty, unit_price = v2, v1
+                        # إذا لم يكن هناك وزن إضافي (مثل الفاتورة 02445)
+                        if float(v1).is_integer() and not float(v2).is_integer():
+                            qty, unit_price = v1, v2
+                        elif float(v2).is_integer() and not float(v1).is_integer():
+                            qty, unit_price = v2, v1
+                        else:
+                            qty = min(v1, v2)
+                            unit_price = max(v1, v2)
                     matched = True
                     break
             if matched: break
 
-    # 2. المحاولة الثانية: الفلترة الذكية للكسور العشرية (لحل مشكلة فاتورة 2567)
+    # 2. في حالة فشل المعادلة (مثل الفاتورة 02567 السطر الأول)
     if not matched:
-        first_whole = next((clean_number(n) for n in candidates if "." not in n and clean_number(n)), None)
-        first_decimal = next((clean_number(n) for n in candidates if "." in n and clean_number(n)), None)
+        decimals =[clean_number(n) for n in candidates if "." in str(n) and clean_number(n)]
+        ints =[clean_number(n) for n in candidates if "." not in str(n) and clean_number(n)]
         
-        if first_whole and first_decimal:
-            qty = first_whole
-            unit_price = first_decimal
+        if decimals and ints:
+            unit_price = decimals[0] # السعر غالباً يكون به كسور عشرية
+            qty = max(ints)          # العدد هو أكبر رقم صحيح متبقي (مثل 200)
         elif len(cand_vals) >= 2:
-            qty = cand_vals[0]
-            unit_price = cand_vals[1]
+            qty = min(cand_vals[0], cand_vals[1])
+            unit_price = max(cand_vals[0], cand_vals[1])
         elif cand_vals:
             unit_price = cand_vals[0]
+
+    # تحويل الكمية إلى رقم صحيح (بدون فواصل) للجمالية
+    if qty is not None:
+        try:
+            qty = int(qty) if float(qty).is_integer() else qty
+        except:
+            pass
 
     all_eng = re.findall(r"[A-Za-z]{2,}", line)
     desc_words =[w for w in all_eng if len(w) >= 4 or w.isupper()]
@@ -239,12 +255,14 @@ def extract_items_positional(word_df, text):
             t = row["text"].strip()
             if not t: continue
             
-            # إيقاف البحث إذا وصلنا للنهاية بشرط ألا يكون سطر العناوين
-            if any(kw in t for kw in STOP_KWS):
-                if not any(h in t for h in HEADER_KW):
-                    break
-                    
-            if any(kw in t for kw in HEADER_KW) or any(kw in t for kw in SKIP_KWS): 
+            is_summary = any(kw in t for kw in STOP_KWS)
+            has_english = bool(re.search(r'[A-Za-z]{3,}', t))
+            
+            # لن يتوقف إلا إذا كان سطر مجاميع حقيقي ولا يوجد به وصف إنجليزي لمنتج
+            if is_summary and not has_english and not any(h in t for h in HEADER_KW):
+                break
+                
+            if any(kw in t for kw in SKIP_KWS) or any(kw in t for kw in HEADER_KW):
                 continue
                 
             parsed = parse_item_line(t)
@@ -255,10 +273,11 @@ def extract_items_positional(word_df, text):
             line = line.strip()
             if not line: continue
             
-            # إيقاف البحث إذا وصلنا للنهاية بشرط ألا يكون سطر العناوين
-            if any(kw in line for kw in STOP_KWS):
-                if not any(h in line for h in HEADER_KW):
-                    break 
+            is_summary = any(kw in line for kw in STOP_KWS)
+            has_english = bool(re.search(r'[A-Za-z]{3,}', line))
+            
+            if is_summary and not has_english and not any(h in line for h in HEADER_KW):
+                break 
                 
             if any(kw in line for kw in SKIP_KWS) or any(kw in line for kw in HEADER_KW):
                 continue
@@ -267,7 +286,7 @@ def extract_items_positional(word_df, text):
             if parsed: 
                 items.append(parsed)
 
-    # تنظيف أخير
+    # تنظيف أخير: التأكد من أن السطر المضاف هو منتج حقيقي وليس أرقام عشوائية
     valid_items =[]
     for item in items:
         if len(item.get("Description", "")) < 3 and len(item.get("SKU", "")) < 3:
@@ -287,7 +306,7 @@ def extract_items_native(pdf_path):
                 for table in (page.extract_tables() or[]):
                     for row in table:
                         if not row: continue
-                        vals =[str(c).strip() if c else "" for c in row]
+                        vals = [str(c).strip() if c else "" for c in row]
                         if is_summary_row(vals): continue
                         num_cells =[v for v in vals if re.sub(r"[,.\s]", "", v).isdigit() and 1 <= len(re.sub(r"[,.\s]", "", v)) <= 8]
                         if len(num_cells) < 2: continue
@@ -342,10 +361,8 @@ def extract_metadata(pdf_path, text):
     if ta:
         expected_tb = round(ta / 1.15, 2)
         expected_vat = round(ta - expected_tb, 2)
-        
         if not tb or abs(tb - expected_tb) > 2: tb = expected_tb
         if not vat or abs(vat - expected_vat) > 2: vat = expected_vat
-
     elif tb:
         ta = round(tb * 1.15, 2)
         vat = round(ta - tb, 2)
@@ -397,9 +414,9 @@ def process_pdf(pdf_path):
             unique_items.append(item)
 
     if not unique_items:
-        unique_items =[{"Unit price": None, "Quantity": None, "Description": "", "SKU": ""}]
+        unique_items = [{"Unit price": None, "Quantity": None, "Description": "", "SKU": ""}]
 
-    rows =[{**meta, **item} for item in unique_items]
+    rows = [{**meta, **item} for item in unique_items]
     return pd.DataFrame(rows).reindex(columns=FINAL_COLS), mode, text
 
 st.set_page_config(page_title="Invoice Extractor", layout="wide")
