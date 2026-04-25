@@ -259,4 +259,269 @@ def parse_item_line(line, tb_val=0.0):
         for ar_key, en_val in SKU_TO_DESC.items():
             if ar_key in sku:
                 dwords = desc.upper().split()
-                if all(w in en_val.upper() for w in dwords) and desc.
+                if all(w in en_val.upper() for w in dwords) and desc.upper() != en_val.upper(): desc = en_val
+                break
+    elif sku and not desc:
+        for ar_key, en_val in SKU_TO_DESC.items():
+            if ar_key in sku:
+                desc = en_val
+                break
+
+    if not (sku or desc): return None
+    return {"SKU": sku, "Description": desc, "Quantity": qty, "Unit price": unit_price}
+
+def extract_items_positional(word_df, text, tb_val):
+    items =[]
+    
+    if not word_df.empty:
+        rows = reconstruct_table_rows(word_df)
+        for row in rows:
+            t = row["text"].strip()
+            if not t: continue
+            
+            is_summary = any(kw in t for kw in STOP_KWS)
+            has_english = bool(re.search(r'[A-Za-z]{3,}', t))
+            
+            if is_summary and not has_english and not any(h in t for h in HEADER_KW):
+                break
+                
+            if any(kw in t for kw in SKIP_KWS) or any(kw in t for kw in HEADER_KW):
+                continue
+                
+            parsed = parse_item_line(t, tb_val)
+            if parsed: items.append(parsed)
+
+    if not items:
+        for line in text.split("\n"):
+            line = line.strip()
+            if not line: continue
+            
+            is_summary = any(kw in line for kw in STOP_KWS)
+            has_english = bool(re.search(r'[A-Za-z]{3,}', line))
+            
+            if is_summary and not has_english and not any(h in line for h in HEADER_KW):
+                break 
+                
+            if any(kw in line for kw in SKIP_KWS) or any(kw in line for kw in HEADER_KW):
+                continue
+                
+            parsed = parse_item_line(line, tb_val)
+            if parsed: 
+                items.append(parsed)
+
+    valid_items =[]
+    for item in items:
+        if len(item.get("Description", "")) < 3 and len(item.get("SKU", "")) < 3:
+            continue
+        valid_items.append(item)
+
+    return valid_items
+
+def is_summary_row(vals):
+    return any(kw in " ".join(vals) for kw in STOP_KWS)
+
+def extract_items_native(pdf_path, tb_val):
+    items =[]
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                for table in (page.extract_tables() or[]):
+                    for row in table:
+                        if not row: continue
+                        vals = [str(c).strip() if c else "" for c in row]
+                        if is_summary_row(vals): continue
+                        num_cells = [v for v in vals if re.sub(r"[,.\s]", "", v).isdigit() and 1 <= len(re.sub(r"[,.\s]", "", v)) <= 8]
+                        if len(num_cells) < 2: continue
+                        
+                        raw_sku  = reshape(vals[5]) if len(vals) > 5 else ""
+                        raw_desc = reshape(vals[4]) if len(vals) > 4 else ""
+                        sku = clean_sku(raw_sku)
+                        
+                        for wrong, correct in SKU_CORRECTIONS.items():
+                            if sku == wrong or wrong in sku:
+                                sku = correct
+
+                        items.append({
+                            "Unit price": clean_number(vals[2]) if len(vals) > 2 else None,
+                            "Quantity": clean_number(vals[3]) if len(vals) > 3 else None,
+                            "Description": raw_desc,
+                            "SKU": sku,
+                        })
+    except Exception: pass
+    return items
+
+def extract_metadata(pdf_path, text):
+    cname = ""
+    m_name = re.search(r'اسم العميل\s*:\s*(.*?)(?=رقم|التاريخ|الرقم|\n)', text)
+    if m_name:
+        cname = m_name.group(1).strip()
+        cname = re.sub(r'الغاتورة.*|الفاتورة.*|الفغاتورة.*|إلى.*', '', cname).strip()
+
+    inv_num = ""
+    m_inv = re.search(r'رقم\s*(?:ال[غف]اتورة|الفغاتورة|فاتورة)\s*[:\-]?\s*(\d{4,6})', text)
+    if not m_inv:
+        m_inv = re.search(r'رقم.*?\s+(\d{4,6})\b', text)
+    if m_inv: inv_num = m_inv.group(1).strip()
+
+    inv_date = ""
+    m_date = re.search(r'تاريخ.*?\s+(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})', text)
+    if m_date: inv_date = m_date.group(1).strip()
+
+    address = ""
+    m_add = re.search(r'العنوان\s*:\s*(.+?)(?=\n\s*05|\n\s*\d{10}|\n\s*البند|\n\s*المجموع|05\d{8}|فيل|كبدة|عجل|فخده|فوركوارتر)', text, re.DOTALL)
+    if m_add:
+        address = m_add.group(1).replace('\n', ' ').strip()
+        address = re.sub(r'\s*\d{10}\s*$', '', address).strip()
+
+    tb = ta = vat = paid = bal = 0.0
+
+    safe_text = re.sub(r'SA\d{22}', '', text)
+    safe_text = re.sub(r'\b\d{10,}\b', '', safe_text)
+
+    m_tot = re.search(r'الإ[جح]مالي\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
+    if m_tot: ta = clean_number(m_tot.group(1))
+
+    m_sub = re.search(r'المجموع\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
+    if m_sub: tb = clean_number(m_sub.group(1))
+
+    m_vat = re.search(r'(?:القيمة المضافة|المضافة|15%)\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
+    if m_vat: vat = clean_number(m_vat.group(1))
+
+    if not ta or not tb:
+        nums_raw =[]
+        for n in re.findall(r"[\d,]+\.?\d*", safe_text):
+            v = clean_number(n)
+            if v and v > 100: nums_raw.append(v)
+        
+        unique = sorted(set(nums_raw))
+        best_diff = float("inf")
+        found_ta, found_tb = ta, tb
+        
+        for i, small in enumerate(unique):
+            for big in unique[i + 1:]:
+                r = big / small
+                if 1.10 <= r <= 1.20:
+                    diff = abs(r - 1.15)
+                    if diff < best_diff:
+                        best_diff = diff
+                        found_tb = small
+                        found_ta = big
+                        
+        if not ta and found_ta: ta = found_ta
+        if not tb and found_tb: tb = found_tb
+
+    if ta:
+        expected_tb = round(ta / 1.15, 2)
+        expected_vat = round(ta - expected_tb, 2)
+        if not tb or abs(tb - expected_tb) > 2: tb = expected_tb
+        if not vat or abs(vat - expected_vat) > 2: vat = expected_vat
+    elif tb:
+        ta = round(tb * 1.15, 2)
+        vat = round(ta - tb, 2)
+
+    paid = 0.0
+    bal = ta if ta else 0.0
+
+    return {
+        "Invoice Number": inv_num,
+        "Invoice Date": inv_date,
+        "Customer Name": cname,
+        "Address": address,
+        "Balance": bal,
+        "Paid": paid,
+        "Total before tax": tb,
+        "VAT 15%": vat,
+        "Total after tax": ta,
+        "Source File": pdf_path.name,
+    }
+
+def process_pdf(pdf_path):
+    text, mode = get_text(pdf_path)
+    meta = extract_metadata(pdf_path, text)
+    tb_val = meta.get("Total before tax", 0.0)
+
+    if mode == "ocr":
+        word_df = get_ocr_words(pdf_path)
+        items   = extract_items_positional(word_df, text, tb_val)
+    else:
+        word_df = pd.DataFrame()
+        items   = extract_items_native(pdf_path, tb_val)
+        if not items:
+            items = extract_items_positional(pd.DataFrame(), text, tb_val)
+
+    file_cname = extract_name_from_filename(pdf_path)
+    if file_cname and len(file_cname) > 3:
+        meta["Customer Name"] = file_cname
+
+    if not meta["Invoice Number"]:
+        m_fname_inv = re.search(r'(\d{4,6})', pdf_path.stem)
+        if m_fname_inv:
+            meta["Invoice Number"] = m_fname_inv.group(1)
+
+    # 💡 تم إلغاء نظام الحذف هنا ليظهر كل منتج في سطر منفصل مهما تطابقت الأرقام
+    if not items:
+        items =[{"Unit price": None, "Quantity": None, "Description": "", "SKU": ""}]
+
+    rows = [{**meta, **item} for item in items]
+    return pd.DataFrame(rows).reindex(columns=FINAL_COLS), mode, text
+
+# =====================
+# Streamlit App UI
+# =====================
+st.set_page_config(page_title="Invoice Extractor", layout="wide")
+st.title("📄 Invoice Extractor — PDF to Excel")
+
+uploaded_files = st.file_uploader("Upload PDF or ZIP files", type=["pdf", "zip"], accept_multiple_files=True)
+debug_mode = st.checkbox("🔍 Show full raw extracted text", value=False)
+
+if uploaded_files:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        pdf_paths =[]
+
+        for uf in uploaded_files:
+            fp = tmp / uf.name
+            fp.write_bytes(uf.read())
+            if uf.name.endswith(".zip"):
+                with zipfile.ZipFile(fp) as z:
+                    z.extractall(tmp)
+                pdf_paths.extend(tmp.glob("*.pdf"))
+            else:
+                pdf_paths.append(fp)
+
+        all_data =[]
+        for i, path in enumerate(pdf_paths):
+            st.write(f"📄 **{path.name}**")
+            with st.spinner("Extracting..."):
+                df, mode, raw_text = process_pdf(path)
+            st.caption(f"Mode: `{mode}` — {len(df)} row(s)")
+
+            if debug_mode:
+                with st.expander(f"📋 Full raw text — {path.name}", expanded=False):
+                    st.text(raw_text)
+
+            if not df.empty:
+                all_data.append(df)
+
+        if all_data:
+            final_df = pd.concat(all_data, ignore_index=True)
+
+            if "Invoice Date" in final_df.columns:
+                final_df["Invoice Date"] = pd.to_datetime(
+                    final_df["Invoice Date"], errors="coerce", dayfirst=True
+                ).dt.strftime("%m/%d/%Y")
+
+            st.success(f"✅ Done! {len(final_df)} total row(s)")
+            st.dataframe(final_df)
+
+            out = BytesIO()
+            final_df.to_excel(out, index=False, engine="openpyxl")
+            out.seek(0)
+            st.download_button(
+                "📥 Download Excel",
+                out,
+                "Invoices.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        else:
+            st.warning("⚠️ No data extracted.")
