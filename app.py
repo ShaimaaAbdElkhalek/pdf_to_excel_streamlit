@@ -52,42 +52,18 @@ FINAL_COLS =[
     "Source File",
 ]
 
-# 💡 كتالوج توحيد المنتجات (بمجرد رؤية كلمة مفتاحية، يتم كتابة الاسم الرسمي)
-PRODUCT_CATALOG = [
-    {
-        "keywords":["فيل ليج", "VEAL LEG", "فيل"],
-        "sku": "فيل ليج هندي صاحبة 18 ك (510)",
-        "desc": "VEAL LEG SAHIBA"
-    },
-    {
-        "keywords":["فوركوارتر", "FOREQUARTER", "FQ", "ROLL", "AMBER"],
-        "sku": "فوركوارتر هندي عمبر",
-        "desc": "FQ FOREQUARTER AMBER"
-    },
-    {
-        "keywords":["كبدة", "LAMBLIVER", "كبدة ضأن", "JUNNE"],
-        "sku": "كبدة ضأن استرالي جوني جولد",
-        "desc": "LAMBLIVER JUNNE GOLD"
-    },
-    {
-        "keywords": ["عجل مقطع", "BONEINCUT"],
-        "sku": "عجل مقطع افيكو نيوزلاندي",
-        "desc": "BONEINCUT WAY"
-    },
-    {
-        "keywords":["فخده", "WHOLE LEG", "رستم"],
-        "sku": "فخده كامله هندي رستم",
-        "desc": "WHOLE LEG RUSTAM"
-    }
-]
+SKU_TO_DESC = {
+    "فيل ليج هندي صاحبة": "VEAL LEG SAHIBA",
+    "فيل ليج هندي": "VEAL LEG HINDI",
+    "فيل ليج": "VEAL LEG",
+    "فوركوارتر هندي": "FOREQUARTER HINDI",
+    "فوركوارتر": "FOREQUARTER",
+}
 
-def standardize_product(raw_text):
-    """يبحث في النص عن كلمة مفتاحية ويرد الاسم الرسمي الموحد"""
-    for product in PRODUCT_CATALOG:
-        for kw in product["keywords"]:
-            if kw.upper() in raw_text.upper():
-                return product["sku"], product["desc"]
-    return None, None
+# 💡 قاموس التصحيح التلقائي لحل مشكلة الـ OCR في الفاتورة الثالثة وتوحيد الاسم
+SKU_CORRECTIONS = {
+    "فيل ليج هندي صاحبة 18 (510)": "فيل ليج هندي صاحبة 18 ك (510)",
+}
 
 def clean_sku(raw_sku):
     cleaned = re.sub(r"\|", " ", raw_sku)
@@ -104,7 +80,14 @@ def extract_sku_from_line(line):
         b_clean = "(" + re.search(r"\d+", b).group() + ")"
         if b_clean not in raw.replace(" ", ""):
             raw = raw + " " + b_clean
-    return clean_sku(raw)
+            
+    sku = clean_sku(raw)
+    # تطبيق التصحيح
+    for wrong, correct in SKU_CORRECTIONS.items():
+        if sku == wrong or wrong in sku:
+            sku = correct
+            
+    return sku
 
 def get_text(pdf_path):
     with fitz.open(pdf_path) as doc:
@@ -147,7 +130,7 @@ def get_ocr_words(pdf_path):
     return data
 
 def reconstruct_table_rows(word_df, y_tolerance=15):
-    if word_df.empty: return[]
+    if word_df.empty: return []
     word_df = word_df.copy()
     word_df["mid_y"] = word_df["top"] + word_df["height"] / 2
     rows =[]
@@ -164,7 +147,7 @@ def reconstruct_table_rows(word_df, y_tolerance=15):
     return rows
 
 def get_nums(segment):
-    return[n for n in re.findall(r"[\d,]+\.?\d*", segment) if clean_number(n) not in (0, None) and len(re.sub(r"[,.]", "", n)) <= 8]
+    return [n for n in re.findall(r"[\d,]+\.?\d*", segment) if clean_number(n) not in (0, None) and len(re.sub(r"[,.]", "", n)) <= 8]
 
 def parse_item_line(line, tb_val=0.0):
     eng_matches = list(re.finditer(r"[A-Za-z]{2,}", line))
@@ -190,7 +173,7 @@ def parse_item_line(line, tb_val=0.0):
         candidates =[n for n in all_nums if n not in pack_bracket]
         row_total = None
     else:
-        candidates = [n for n in all_nums[:-1] if n not in pack_bracket]
+        candidates =[n for n in all_nums[:-1] if n not in pack_bracket]
         rt = clean_number(all_nums[-1])
         row_total = rt if rt and rt > 100 else None
 
@@ -199,334 +182,81 @@ def parse_item_line(line, tb_val=0.0):
     qty = None
     unit_price = None
     
-    cand_vals = [clean_number(n) for n in candidates if clean_number(n)]
+    cand_floats = [clean_number(n) for n in candidates if clean_number(n)]
+    valid_strs = [s for s in candidates if clean_number(s)]
     matched = False
 
-    # 💡 الترتيب الذكي: اختبار (إجمالي السطر) ثم اختبار (إجمالي الفاتورة) لتجاوز أرقام الأوزان
     targets =[]
     if row_total and row_total > 0: targets.append(row_total)
     if tb_val and tb_val > 0: targets.append(tb_val)
 
+    # 💡 خوارزمية ذكية لاستخراج العدد والسعر (تعرف السعر من العلامة العشرية)
     for target in targets:
-        for i, v1 in enumerate(cand_vals):
-            for j, v2 in enumerate(cand_vals):
-                if i == j: continue
-                # إذا وجدنا أن حاصل الضرب = الإجمالي
+        for i, v1 in enumerate(cand_floats):
+            for j, v2 in enumerate(cand_floats):
+                if i >= j: continue
                 if abs(v1 * v2 - target) / target < 0.05:
-                    is_v1_int = float(v1).is_integer()
-                    is_v2_int = float(v2).is_integer()
-                    # أولوية تخصيص الرقم الصحيح للكمية
-                    if is_v1_int and not is_v2_int:
-                        qty, unit_price = v1, v2
-                    elif is_v2_int and not is_v1_int:
-                        qty, unit_price = v2, v1
-                    else:
-                        # في حالة الرقمين صحيحين، يتم أخذ الترتيب الأصلي في السطر (الكمية أولاً)
-                        if i < j:
-                            qty, unit_price = v1, v2
+                    leftovers =[v for idx, v in enumerate(cand_floats) if idx not in (i, j)]
+                    if leftovers:
+                        qty = leftovers[0]
+                        s1, s2 = valid_strs[i], valid_strs[j]
+                        # الرقم الذي يحتوى على فاصلة عشرية هو السعر
+                        if '.' in s1 and '.' not in s2:
+                            unit_price = v1
+                        elif '.' in s2 and '.' not in s1:
+                            unit_price = v2
                         else:
+                            unit_price = min(v1, v2)
+                    else:
+                        s1, s2 = valid_strs[i], valid_strs[j]
+                        if float(v1).is_integer() and not float(v2).is_integer():
+                            qty, unit_price = v1, v2
+                        elif float(v2).is_integer() and not float(v1).is_integer():
                             qty, unit_price = v2, v1
+                        else:
+                            if '.' in s1 and '.' not in s2:
+                                qty, unit_price = v2, v1
+                            elif '.' in s2 and '.' not in s1:
+                                qty, unit_price = v1, v2
+                            else:
+                                qty, unit_price = min(v1, v2), max(v1, v2)
                     matched = True
                     break
             if matched: break
         if matched: break
 
-    # حالة احتياطية إذا فشلت كل المعادلات
+    # حالة احتياطية (Fallback)
     if not matched:
-        decimals =[v for v in cand_vals if not float(v).is_integer()]
-        ints =[v for v in cand_vals if float(v).is_integer()]
-        
-        if decimals and ints:
-            unit_price = decimals[0]
-            qty = max(ints)
-        elif len(cand_vals) >= 2:
-            qty = cand_vals[0]
-            unit_price = cand_vals[1]
-        elif cand_vals:
-            unit_price = cand_vals[0]
+        has_dot =[idx for idx, s in enumerate(valid_strs) if '.' in s]
+        if len(has_dot) == 1:
+            unit_price = cand_floats[has_dot[0]]
+            others =[v for idx, v in enumerate(cand_floats) if idx != has_dot[0]]
+            qty = max(others) if others else unit_price
+        elif len(cand_floats) >= 2:
+            qty = cand_floats[0]
+            unit_price = cand_floats[1]
+        elif cand_floats:
+            qty = cand_floats[0]
+            unit_price = cand_floats[0]
 
-    # إزالة الفواصل من الكمية
     if qty is not None:
         try:
             qty = int(qty) if float(qty).is_integer() else qty
         except:
             pass
 
-    # 💡 تطبيق الكتالوج لتوحيد اسم المنتج بشكل قاطع
-    std_sku, std_desc = standardize_product(line)
-    
-    if std_sku and std_desc:
-        sku, desc = std_sku, std_desc
-    else:
-        all_eng = re.findall(r"[A-Za-z]{2,}", line)
-        desc_words =[w for w in all_eng if len(w) >= 4 or w.isupper()]
-        desc = " ".join(dict.fromkeys(desc_words)).strip()
-        sku = extract_sku_from_line(line)
+    all_eng = re.findall(r"[A-Za-z]{2,}", line)
+    desc_words =[w for w in all_eng if len(w) >= 4 or w.isupper()]
+    seen_w, deduped = set(),[]
+    for w in desc_words:
+        if w.upper() not in seen_w:
+            seen_w.add(w.upper())
+            deduped.append(w)
+    desc = " ".join(deduped).strip()
+    sku = extract_sku_from_line(line)
 
-    if not (sku or desc): return None
-    return {"SKU": sku, "Description": desc, "Quantity": qty, "Unit price": unit_price}
-
-def extract_items_positional(word_df, text, tb_val):
-    items =[]
-    
-    if not word_df.empty:
-        rows = reconstruct_table_rows(word_df)
-        for row in rows:
-            t = row["text"].strip()
-            if not t: continue
-            
-            is_summary = any(kw in t for kw in STOP_KWS)
-            has_english = bool(re.search(r'[A-Za-z]{3,}', t))
-            
-            if is_summary and not has_english and not any(h in t for h in HEADER_KW):
-                break
-                
-            if any(kw in t for kw in SKIP_KWS) or any(kw in t for kw in HEADER_KW):
-                continue
-                
-            parsed = parse_item_line(t, tb_val)
-            if parsed: items.append(parsed)
-
-    if not items:
-        for line in text.split("\n"):
-            line = line.strip()
-            if not line: continue
-            
-            is_summary = any(kw in line for kw in STOP_KWS)
-            has_english = bool(re.search(r'[A-Za-z]{3,}', line))
-            
-            if is_summary and not has_english and not any(h in line for h in HEADER_KW):
-                break 
-                
-            if any(kw in line for kw in SKIP_KWS) or any(kw in line for kw in HEADER_KW):
-                continue
-                
-            parsed = parse_item_line(line, tb_val)
-            if parsed: 
-                items.append(parsed)
-
-    valid_items =[]
-    for item in items:
-        if len(item.get("Description", "")) < 3 and len(item.get("SKU", "")) < 3:
-            continue
-        valid_items.append(item)
-
-    return valid_items
-
-def is_summary_row(vals):
-    return any(kw in " ".join(vals) for kw in STOP_KWS)
-
-def extract_items_native(pdf_path, tb_val):
-    items =[]
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages:
-                for table in (page.extract_tables() or[]):
-                    for row in table:
-                        if not row: continue
-                        vals =[str(c).strip() if c else "" for c in row]
-                        if is_summary_row(vals): continue
-                        num_cells = [v for v in vals if re.sub(r"[,.\s]", "", v).isdigit() and 1 <= len(re.sub(r"[,.\s]", "", v)) <= 8]
-                        if len(num_cells) < 2: continue
-                        
-                        raw_sku  = reshape(vals[5]) if len(vals) > 5 else ""
-                        raw_desc = reshape(vals[4]) if len(vals) > 4 else ""
-                        
-                        # توحيد المنتج
-                        std_sku, std_desc = standardize_product(raw_desc + " " + raw_sku)
-                        sku = std_sku if std_sku else clean_sku(raw_sku)
-                        desc = std_desc if std_desc else raw_desc
-                        
-                        items.append({
-                            "Unit price": clean_number(vals[2]) if len(vals) > 2 else None,
-                            "Quantity": clean_number(vals[3]) if len(vals) > 3 else None,
-                            "Description": desc,
-                            "SKU": sku,
-                        })
-    except Exception: pass
-    return items
-
-def extract_metadata(pdf_path, text):
-    cname = ""
-    m_name = re.search(r'اسم العميل\s*:\s*(.*?)(?=رقم|التاريخ|الرقم|\n)', text)
-    if m_name:
-        cname = m_name.group(1).strip()
-        cname = re.sub(r'الغاتورة.*|الفاتورة.*|الفغاتورة.*|إلى.*', '', cname).strip()
-
-    inv_num = ""
-    m_inv = re.search(r'رقم\s*(?:ال[غف]اتورة|الفغاتورة|فاتورة)\s*[:\-]?\s*(\d{4,6})', text)
-    if not m_inv:
-        m_inv = re.search(r'رقم.*?\s+(\d{4,6})\b', text)
-    if m_inv: inv_num = m_inv.group(1).strip()
-
-    inv_date = ""
-    m_date = re.search(r'تاريخ.*?\s+(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})', text)
-    if m_date: inv_date = m_date.group(1).strip()
-
-    address = ""
-    m_add = re.search(r'العنوان\s*:\s*(.+?)(?=\n\s*05|\n\s*\d{10}|\n\s*البند|\n\s*المجموع|05\d{8}|فيل|كبدة|عجل|فخده|فوركوارتر)', text, re.DOTALL)
-    if m_add:
-        address = m_add.group(1).replace('\n', ' ').strip()
-        address = re.sub(r'\s*\d{10}\s*$', '', address).strip()
-
-    tb = ta = vat = paid = bal = 0.0
-
-    safe_text = re.sub(r'SA\d{22}', '', text)
-    safe_text = re.sub(r'\b\d{10,}\b', '', safe_text) # تنظيف الأرقام البنكية
-
-    m_tot = re.search(r'الإ[جح]مالي\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
-    if m_tot: ta = clean_number(m_tot.group(1))
-
-    m_sub = re.search(r'المجموع\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
-    if m_sub: tb = clean_number(m_sub.group(1))
-
-    m_vat = re.search(r'(?:القيمة المضافة|المضافة|15%)\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
-    if m_vat: vat = clean_number(m_vat.group(1))
-
-    # 💡 الباحث الرياضي (Math Scanner): لإنقاذ الفواتير التي تشتت فيها الأرقام (مثل 2717)
-    if not ta or not tb:
-        nums_raw =[]
-        for n in re.findall(r"[\d,]+\.?\d*", safe_text):
-            v = clean_number(n)
-            if v and v > 100: nums_raw.append(v)
-        
-        unique = sorted(set(nums_raw))
-        best_diff = float("inf")
-        found_ta, found_tb = ta, tb
-        
-        for i, small in enumerate(unique):
-            for big in unique[i + 1:]:
-                r = big / small
-                if 1.10 <= r <= 1.20: # النسبة 1.15
-                    diff = abs(r - 1.15)
-                    if diff < best_diff:
-                        best_diff = diff
-                        found_tb = small
-                        found_ta = big
-                        
-        if not ta and found_ta: ta = found_ta
-        if not tb and found_tb: tb = found_tb
-
-    # تأكيد التصحيح النهائي
-    if ta:
-        expected_tb = round(ta / 1.15, 2)
-        expected_vat = round(ta - expected_tb, 2)
-        if not tb or abs(tb - expected_tb) > 2: tb = expected_tb
-        if not vat or abs(vat - expected_vat) > 2: vat = expected_vat
-    elif tb:
-        ta = round(tb * 1.15, 2)
-        vat = round(ta - tb, 2)
-
-    paid = 0.0
-    bal = ta if ta else 0.0
-
-    return {
-        "Invoice Number": inv_num,
-        "Invoice Date": inv_date,
-        "Customer Name": cname,
-        "Address": address,
-        "Balance": bal,
-        "Paid": paid,
-        "Total before tax": tb,
-        "VAT 15%": vat,
-        "Total after tax": ta,
-        "Source File": pdf_path.name,
-    }
-
-def process_pdf(pdf_path):
-    text, mode = get_text(pdf_path)
-    meta = extract_metadata(pdf_path, text)
-    tb_val = meta.get("Total before tax", 0.0)
-
-    if mode == "ocr":
-        word_df = get_ocr_words(pdf_path)
-        items   = extract_items_positional(word_df, text, tb_val)
-    else:
-        word_df = pd.DataFrame()
-        items   = extract_items_native(pdf_path, tb_val)
-        if not items:
-            items = extract_items_positional(pd.DataFrame(), text, tb_val)
-
-    file_cname = extract_name_from_filename(pdf_path)
-    if file_cname and len(file_cname) > 3:
-        meta["Customer Name"] = file_cname
-
-    if not meta["Invoice Number"]:
-        m_fname_inv = re.search(r'(\d{4,6})', pdf_path.stem)
-        if m_fname_inv:
-            meta["Invoice Number"] = m_fname_inv.group(1)
-
-    seen = set()
-    unique_items =[]
-    for item in items:
-        key = (item.get("Description", ""), item.get("Unit price"), item.get("Quantity"))
-        if key not in seen:
-            seen.add(key)
-            unique_items.append(item)
-
-    if not unique_items:
-        unique_items =[{"Unit price": None, "Quantity": None, "Description": "", "SKU": ""}]
-
-    rows = [{**meta, **item} for item in unique_items]
-    return pd.DataFrame(rows).reindex(columns=FINAL_COLS), mode, text
-
-# =====================
-# Streamlit App UI
-# =====================
-st.set_page_config(page_title="Invoice Extractor", layout="wide")
-st.title("📄 Invoice Extractor — PDF to Excel")
-
-uploaded_files = st.file_uploader("Upload PDF or ZIP files", type=["pdf", "zip"], accept_multiple_files=True)
-debug_mode = st.checkbox("🔍 Show full raw extracted text", value=False)
-
-if uploaded_files:
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-        pdf_paths =[]
-
-        for uf in uploaded_files:
-            fp = tmp / uf.name
-            fp.write_bytes(uf.read())
-            if uf.name.endswith(".zip"):
-                with zipfile.ZipFile(fp) as z:
-                    z.extractall(tmp)
-                pdf_paths.extend(tmp.glob("*.pdf"))
-            else:
-                pdf_paths.append(fp)
-
-        all_data =[]
-        for i, path in enumerate(pdf_paths):
-            st.write(f"📄 **{path.name}**")
-            with st.spinner("Extracting..."):
-                df, mode, raw_text = process_pdf(path)
-            st.caption(f"Mode: `{mode}` — {len(df)} row(s)")
-
-            if debug_mode:
-                with st.expander(f"📋 Full raw text — {path.name}", expanded=False):
-                    st.text(raw_text)
-
-            if not df.empty:
-                all_data.append(df)
-
-        if all_data:
-            final_df = pd.concat(all_data, ignore_index=True)
-
-            if "Invoice Date" in final_df.columns:
-                final_df["Invoice Date"] = pd.to_datetime(
-                    final_df["Invoice Date"], errors="coerce", dayfirst=True
-                ).dt.strftime("%m/%d/%Y")
-
-            st.success(f"✅ Done! {len(final_df)} total row(s)")
-            st.dataframe(final_df)
-
-            out = BytesIO()
-            final_df.to_excel(out, index=False, engine="openpyxl")
-            out.seek(0)
-            st.download_button(
-                "📥 Download Excel",
-                out,
-                "Invoices.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        else:
-            st.warning("⚠️ No data extracted.")
+    if sku and desc:
+        for ar_key, en_val in SKU_TO_DESC.items():
+            if ar_key in sku:
+                dwords = desc.upper().split()
+                if all(w in en_val.upper() for w in dwords) and desc.
