@@ -2,7 +2,6 @@
 
 import streamlit as st
 import fitz
-import pdfplumber
 import pandas as pd
 import re
 import tempfile
@@ -10,196 +9,132 @@ import zipfile
 from pathlib import Path
 from io import BytesIO
 
-# OCR
 import pytesseract
 from pdf2image import convert_from_path
 
 # =========================
-# OCR FUNCTION (FIXED 🔥)
+# OCR FUNCTION
 # =========================
 
 def ocr_pdf(pdf_path):
-    text_pages = []
-    images = convert_from_path(pdf_path, dpi=400)  # higher quality
+    images = convert_from_path(pdf_path, dpi=400)
+    text = ""
 
     for img in images:
-        text = pytesseract.image_to_string(
+        text += pytesseract.image_to_string(
             img,
-            lang="ara",  # 🔥 IMPORTANT: Arabic only
-            config="--oem 3 --psm 4"
-        )
-        text_pages.append(text)
+            lang="ara",
+            config="--oem 3 --psm 6"
+        ) + "\n"
 
-    return "\n".join(text_pages)
+    return text
 
 # =========================
-# TEXT CLEANING
+# CLEAN TEXT
 # =========================
 
-def normalize_text(text):
-    text = text.replace("ـ", "")
-    text = text.replace("٬", "").replace("٫", ".")
+def clean_text(text):
+    text = text.replace("\n", " ")
     text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    return text
 
 # =========================
-# SMART FIELD EXTRACTION
+# SMART EXTRACTION 🔥
 # =========================
 
-def extract_invoice_number(text):
-    # Try normal Arabic label
-    match = re.search(r"(رقم.*?)(\d{4,})", text)
-    if match:
-        return match.group(2)
+def extract_data(text):
 
-    # fallback: first long number
-    match = re.search(r"\b\d{4,}\b", text)
-    return match.group(0) if match else ""
+    data = {}
 
+    # 🔥 Invoice Number
+    inv = re.search(r"رقم الفاتورة\s*[:\-]?\s*(\d+)", text)
+    if not inv:
+        inv = re.search(r"\b0?\d{4,5}\b", text)
+    data["Invoice Number"] = inv.group(1) if inv else ""
 
-def extract_customer(text):
-    # Look for مؤسسة or شركة
-    match = re.search(r"(مؤسسة\s+[^\n]+)", text)
-    if match:
-        return match.group(1)
+    # 🔥 Date
+    date = re.search(r"\d{2}/\d{2}/\d{4}", text)
+    data["Invoice Date"] = date.group(0) if date else ""
 
-    match = re.search(r"(شركة\s+[^\n]+)", text)
-    return match.group(1) if match else ""
+    # 🔥 Customer Name
+    cust = re.search(r"مؤسسة\s+[^\d]+", text)
+    if not cust:
+        cust = re.search(r"شركة\s+[^\d]+", text)
+    data["Customer Name"] = cust.group(0).strip() if cust else ""
 
+    # 🔥 Address
+    addr = re.search(r"(حي\s+[^\d]+جدة)", text)
+    data["Address"] = addr.group(0) if addr else ""
 
-def extract_address(text):
-    match = re.search(r"(حي\s+[^\n]+)", text)
-    return match.group(1) if match else ""
+    # 🔥 Tax Number (very reliable)
+    tax = re.search(r"\b3\d{14}\b", text)
+    data["Tax Number"] = tax.group(0) if tax else ""
 
+    # 🔥 Paid / Balance
+    paid = re.search(r"مدفوع\s*(\d+)", text)
+    data["Paid"] = paid.group(1) if paid else "0"
 
-# =========================
-# METADATA EXTRACTION
-# =========================
+    balance = re.search(r"الرصيد المستحق\s*(\d+)", text)
+    data["Balance"] = balance.group(1) if balance else "0"
 
-def extract_metadata(pdf_path):
-    try:
-        with fitz.open(pdf_path) as doc:
-            text = "\n".join([page.get_text() for page in doc])
-
-        # OCR fallback
-        if not text.strip() or len(text.strip()) < 50:
-            text = ocr_pdf(pdf_path)
-
-        text = normalize_text(text)
-
-        # 🔥 DEBUG (see OCR result)
-        st.text_area("🔍 OCR TEXT", text[:2000], height=200)
-
-        metadata = {
-            "Invoice Number": extract_invoice_number(text),
-            "Customer Name": extract_customer(text),
-            "Address": extract_address(text),
-            "Invoice Date": "",
-            "Paid": "",
-            "Balance": "",
-            "Not Paid": "",
-            "Source File": pdf_path.name
-        }
-
-        return metadata
-
-    except Exception as e:
-        st.error(f"❌ Metadata error: {e}")
-        return {}
+    return data
 
 # =========================
-# TABLE EXTRACTION (OCR BASED)
-# =========================
-
-def extract_tables(pdf_path):
-    try:
-        text = ocr_pdf(pdf_path)
-        lines = text.split("\n")
-
-        data = []
-
-        for line in lines:
-            if re.search(r"\d", line):
-                parts = re.split(r"\s{2,}", line)
-                if len(parts) >= 3:
-                    data.append(parts)
-
-        return pd.DataFrame(data) if data else pd.DataFrame()
-
-    except Exception as e:
-        st.error(f"❌ Table error: {e}")
-        return pd.DataFrame()
-
-# =========================
-# MAIN PROCESS
+# PROCESS
 # =========================
 
 def process_pdf(pdf_path):
-    metadata = extract_metadata(pdf_path)
-    table_data = extract_tables(pdf_path)
+    text = ocr_pdf(pdf_path)
+    text = clean_text(text)
 
-    if not table_data.empty:
-        for key, value in metadata.items():
-            table_data[key] = value
-        return table_data
-    else:
-        return pd.DataFrame([metadata])
+    # 👇 DEBUG (important)
+    st.text_area("🔍 OCR TEXT", text[:1500], height=200)
+
+    data = extract_data(text)
+    data["Source File"] = pdf_path.name
+
+    return pd.DataFrame([data])
 
 # =========================
-# STREAMLIT UI
+# UI
 # =========================
 
-st.set_page_config(page_title="Arabic Invoice Extractor", layout="wide")
-st.title("📄 Arabic Invoice Extractor (Stable Version)")
+st.set_page_config(layout="wide")
+st.title("📄 Arabic Invoice Extractor (Accurate Version)")
 
-uploaded_files = st.file_uploader(
-    "Upload PDF or ZIP",
-    type=["pdf", "zip"],
-    accept_multiple_files=True
-)
+files = st.file_uploader("Upload PDF or ZIP", type=["pdf", "zip"], accept_multiple_files=True)
 
-if uploaded_files:
+if files:
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_dir = Path(temp_dir)
-        pdf_paths = []
+        pdfs = []
 
-        for uploaded_file in uploaded_files:
-            file_path = temp_dir / uploaded_file.name
+        for f in files:
+            path = temp_dir / f.name
+            with open(path, "wb") as file:
+                file.write(f.read())
 
-            with open(file_path, "wb") as f:
-                f.write(uploaded_file.read())
-
-            if uploaded_file.name.endswith(".zip"):
-                with zipfile.ZipFile(file_path, 'r') as zip_ref:
+            if f.name.endswith(".zip"):
+                with zipfile.ZipFile(path, 'r') as zip_ref:
                     zip_ref.extractall(temp_dir)
-                pdf_paths.extend(temp_dir.glob("*.pdf"))
+                pdfs.extend(temp_dir.glob("*.pdf"))
             else:
-                pdf_paths.append(file_path)
+                pdfs.append(path)
 
         all_data = []
 
-        for pdf_path in pdf_paths:
-            st.write(f"📄 Processing: {pdf_path.name}")
-            df = process_pdf(pdf_path)
+        for pdf in pdfs:
+            st.write(f"📄 Processing: {pdf.name}")
+            df = process_pdf(pdf)
+            all_data.append(df)
 
-            if not df.empty:
-                all_data.append(df)
+        final_df = pd.concat(all_data, ignore_index=True)
 
-        if all_data:
-            final_df = pd.concat(all_data, ignore_index=True)
+        st.success("✅ Extraction complete")
+        st.dataframe(final_df)
 
-            st.success("✅ Extraction complete!")
-            st.dataframe(final_df)
+        output = BytesIO()
+        final_df.to_excel(output, index=False)
+        output.seek(0)
 
-            output = BytesIO()
-            final_df.to_excel(output, index=False)
-            output.seek(0)
-
-            st.download_button(
-                "📥 Download Excel",
-                data=output,
-                file_name="Invoices.xlsx"
-            )
-
-        else:
-            st.warning("⚠️ No data extracted.")
+        st.download_button("📥 Download Excel", data=output, file_name="invoices.xlsx")
