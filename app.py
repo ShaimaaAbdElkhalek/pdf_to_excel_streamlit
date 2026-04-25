@@ -52,7 +52,7 @@ FINAL_COLS =[
     "Source File",
 ]
 
-# 👑 الكتالوج الصارم لتوحيد أسماء المنتجات
+# 👑 الكتالوج الصارم لتوحيد أسماء المنتجات تماماً
 PRODUCT_CATALOG =[
     {
         "keywords":["صاحبة", "SAHIBA"],
@@ -88,6 +88,16 @@ PRODUCT_CATALOG =[
         "keywords":["فيليه", "TENDERLOIN"],
         "sku": "فيليه عجل هندي عمبر 18 ك (99)",
         "desc": "VEAL TENDERLOIN KG"
+    },
+    {
+        "keywords":["صدور", "BREAST", "RUSSIA"],
+        "sku": "صدور دجاج روسي",
+        "desc": "CHICKEN BREAST RUSSIA"
+    },
+    {
+        "keywords":["امامي", "FORESHANK", "استرالي"],
+        "sku": "امامي لامب بالك استرالي",
+        "desc": "FORESHANK AS JLO"
     }
 ]
 
@@ -167,67 +177,86 @@ def reconstruct_table_rows(word_df, y_tolerance=15):
     rows.sort(key=lambda r: r["y"])
     return rows
 
-def get_nums(segment):
+def get_nums_with_context(segment):
+    # استخراج الأرقام مع الحفاظ على الفواصل العشرية للتعرف عليها
     seg_clean = segment.replace(",", "")
     matches = re.findall(r"\b\d+(?:\.\d+)?\b", seg_clean)
-    return[n for n in matches if clean_number(n) and clean_number(n) > 0]
+    res =[]
+    for m in matches:
+        v = clean_number(m)
+        if v is not None and v > 0:
+            res.append((m, v))
+    return res
 
 def parse_item_line(line, tb_val=0.0):
-    # مسح الأقواس لتجنب تداخل الأرقام مثل (99) أو (510)
-    line_clean = re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", line)
-
-    raw_nums = get_nums(line_clean)
-    valid_strs =[]
-    cand_floats =[]
+    # تنظيف الأقواس لتجنب تداخل أرقام مثل (510) أو (99)
+    line_clean = re.sub(r"[\(\)\[\]]\s*\d+\s*[\(\)\[\]]", " ", line)
+    nums = get_nums_with_context(line_clean)
     
-    for s in raw_nums:
-        v = clean_number(s)
-        if v and v > 0:
-            valid_strs.append(s)
-            cand_floats.append(v)
-            
-    if len(cand_floats) < 2: return None
-
-    # حذف الإجمالي من السطر إذا كان موجوداً في النهاية لكي لا نشوش على الكمية والسعر
-    row_total = None
-    if len(cand_floats) >= 3 and cand_floats[-1] > 100 and cand_floats[-1] > cand_floats[-2]:
-        row_total = cand_floats[-1]
-
-    # فصل الأرقام التي بها علامة عشرية (السعر) عن الأرقام الصحيحة (الكمية)
-    integers_strs =[s for s in valid_strs if '.' not in s]
-    decimals_strs =[s for s in valid_strs if '.' in s]
-
-    # تخطي أرقام الأكواد المزعجة حتى لا يعتبرها كمية
-    sku_nums =['18', '99', '510', '106', '6']
-    integers_strs =[s for s in integers_strs if s not in sku_nums]
+    if len(nums) < 2: return None
 
     qty = None
     unit_price = None
+    matched = False
 
-    # 💡 القاعدة الذهبية: أول رقم صحيح متبقي هو الكمية
-    if integers_strs:
-        qty = clean_number(integers_strs[0])
+    # 1. المطابقة الرياضية القاطعة (الكمية × السعر = الإجمالي)
+    for i, (s1, v1) in enumerate(nums):
+        for j, (s2, v2) in enumerate(nums):
+            if i >= j: continue
+            for k, (s3, v3) in enumerate(nums):
+                if k == i or k == j: continue
+                # إذا تطابقت حسبة الضرب
+                if abs(v1 * v2 - v3) / v3 < 0.05:
+                    if '.' in s1 and '.' not in s2:
+                        unit_price, qty = v1, v2
+                    elif '.' in s2 and '.' not in s1:
+                        unit_price, qty = v2, v1
+                    else:
+                        unit_price, qty = max(v1, v2), min(v1, v2)
+                    matched = True
+                    break
+            if matched: break
+        if matched: break
 
-    decimals_vals = [clean_number(s) for s in decimals_strs]
-    
-    # 💡 القاعدة الذهبية: الرقم ذو العلامة العشرية هو السعر
-    if decimals_vals:
-        if len(decimals_vals) >= 2 and decimals_vals[-1] > 100 and decimals_vals[-1] > decimals_vals[-2] * 2:
-            unit_price = decimals_vals[-2]
-        else:
-            if len(decimals_vals) == 1 and row_total and decimals_vals[0] == row_total:
-                unit_price = None
-            else:
-                unit_price = decimals_vals[-1]
-
-    # احتياطي إذا فشل الـ OCR في قراءة الفاصلة العشرية
-    if unit_price is None and len(integers_strs) >= 2:
-        unit_price = clean_number(integers_strs[1])
+    # 2. 💡 القاعدة الذهبية (التي اقترحتها أنت): الفاصلة العشرية هي السعر، وما قبلها هو العدد!
+    if not matched:
+        # نستبعد أرقام الأكواد المعروفة من أن تكون كميات
+        sku_nums = {18, 99, 510, 106, 6, 2, 4, 3590, 10, 9}
         
-    if qty is None and cand_floats:
-        qty = cand_floats[0]
+        decimals =[(i, s, v) for i, (s, v) in enumerate(nums) if '.' in s]
+        integers =[(i, s, v) for i, (s, v) in enumerate(nums) if '.' not in s and v not in sku_nums]
+        
+        if decimals:
+            # إذا كان هناك أكثر من رقم عشري (مثل السعر والمجموع)، نختار السعر بذكاء
+            if len(decimals) >= 2 and decimals[-1][2] > 100 and decimals[-1][2] > decimals[-2][2] * 1.5:
+                price_candidate = decimals[-2]
+            else:
+                price_candidate = decimals[-1]
+                
+            unit_price = price_candidate[2]
+            price_idx = price_candidate[0]
+            
+            # 💡 نختار الرقم الصحيح الذي يسبق السعر مباشرة ليكون هو الكمية
+            possible_qtys_before = [t for t in integers if t[0] < price_idx]
+            if possible_qtys_before:
+                qty = possible_qtys_before[-1][2]
+            else:
+                # إذا لم يكن هناك رقم قبله (بسبب قلب النصوص في الـ OCR)، نأخذ الذي بعده
+                possible_qtys_after = [t for t in integers if t[0] > price_idx]
+                if possible_qtys_after:
+                    qty = possible_qtys_after[0][2]
+                elif integers:
+                    qty = integers[0][2]
+        else:
+            # احتياطي أخير إذا اختفت العلامات العشرية تماماً
+            if len(integers) >= 2:
+                qty = integers[-2][2]
+                unit_price = integers[-1][2]
+            elif nums:
+                qty = nums[0][1]
+                unit_price = nums[0][1]
 
-    # التأكد من كتابة الكمية كرقم صحيح
+    # تحويل الكمية إلى رقم صحيح نظيف
     if qty is not None:
         try:
             qty = int(qty) if float(qty).is_integer() else qty
@@ -284,7 +313,7 @@ def extract_metadata(pdf_path, text):
     if m_date: inv_date = m_date.group(1).strip()
 
     address = ""
-    m_add = re.search(r'العنوان\s*:\s*(.+?)(?=\n\s*05|\n\s*\d{10}|\n\s*البند|\n\s*المجموع|05\d{8}|فيل|كبدة|عجل|فخده|فوركوارتر|فيليه)', text, re.DOTALL)
+    m_add = re.search(r'العنوان\s*:\s*(.+?)(?=\n\s*05|\n\s*\d{10}|\n\s*البند|\n\s*المجموع|05\d{8}|فيل|كبدة|عجل|فخده|فوركوارتر|فيليه|صدور|امامي)', text, re.DOTALL)
     if m_add:
         address = m_add.group(1).replace('\n', ' ').strip()
         address = re.sub(r'\s*\d{10}\s*$', '', address).strip()
@@ -371,7 +400,7 @@ def process_pdf(pdf_path):
     if not items:
         items =[{"Unit price": None, "Quantity": None, "Description": "", "SKU": ""}]
 
-    rows =[{**meta, **item} for item in items]
+    rows = [{**meta, **item} for item in items]
     return pd.DataFrame(rows).reindex(columns=FINAL_COLS), mode, text
 
 # =====================
