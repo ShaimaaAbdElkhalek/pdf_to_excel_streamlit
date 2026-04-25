@@ -6,89 +6,92 @@ import pytesseract
 
 
 # -----------------------------
-# SMART CLEANING (IMPORTANT)
+# ADVANCED CLEANING ENGINE
 # -----------------------------
-def smart_clean(lines):
-    cleaned = []
+def is_noise(line):
+    line = line.strip()
 
-    for line in lines:
-        line = line.strip()
+    # remove tiny garbage
+    if len(line) < 3:
+        return True
 
-        if not line:
-            continue
+    # only numbers / symbols
+    if re.fullmatch(r'[\d\s\-\.:,%()+]+', line):
+        return True
 
-        # remove pure garbage lines (numbers only / single chars)
-        if re.fullmatch(r'[\d\s\-\.:,()%]+', line):
-            continue
+    # OCR garbage patterns
+    garbage_words = ["ee", "ae", "ob", "fay", "cece", "rates", "ta", "crs"]
 
-        # remove OCR noise fragments
-        if len(line) < 3:
-            continue
+    if any(g in line.lower() for g in garbage_words):
+        if len(line.split()) < 5:
+            return True
 
-        # keep Arabic + English + numbers only
-        line = re.sub(r'[^\w\s\u0600-\u06FF%:.,()/\-\+]', ' ', line)
+    return False
 
-        # normalize spaces
-        line = re.sub(r'\s+', ' ', line).strip()
 
-        cleaned.append(line)
-
-    return cleaned
+def clean_line(line):
+    line = re.sub(r'[^\w\s\u0600-\u06FF%:.,()/\-\+]', ' ', line)
+    line = re.sub(r'\s+', ' ', line).strip()
+    return line
 
 
 # -----------------------------
-# OCR FUNCTION
+# SMART OCR
 # -----------------------------
-def pdf_to_text(pdf_path):
+def extract_text(pdf_path):
     images = convert_from_path(pdf_path, dpi=400)
-
-    all_pages = []
-
     config = r'--oem 3 --psm 6 -l ara+eng'
+
+    all_clean = []
 
     for img in images:
         text = pytesseract.image_to_string(img, config=config)
 
         lines = text.split("\n")
 
-        clean_lines = smart_clean(lines)
+        for line in lines:
+            line = clean_line(line)
 
-        if clean_lines:
-            all_pages.append("\n".join(clean_lines))
+            if not line:
+                continue
 
-    return "\n\n".join(all_pages)
+            if is_noise(line):
+                continue
+
+            all_clean.append(line)
+
+    return "\n".join(all_clean)
 
 
 # -----------------------------
 # STREAMLIT UI
 # -----------------------------
-st.set_page_config(page_title="Smart Invoice OCR", layout="wide")
+st.set_page_config(page_title="AI Invoice Cleaner", layout="wide")
 
-st.title("📄 Smart Invoice OCR (Arabic + English Clean)")
+st.title("📄 AI Invoice OCR Cleaner (Production Level)")
 
-uploaded_file = st.file_uploader("Upload PDF Invoice", type=["pdf"])
+file = st.file_uploader("Upload PDF Invoice", type=["pdf"])
 
-if uploaded_file:
+if file:
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(uploaded_file.read())
+        tmp.write(file.read())
         path = tmp.name
 
-    with st.spinner("Reading invoice..."):
+    with st.spinner("Processing invoice..."):
 
-        text = pdf_to_text(path)
+        result = extract_text(path)
 
-    if not text.strip():
-        st.error("No readable text found 😢")
+    if not result.strip():
+        st.error("No usable text found 😢")
     else:
-        st.success("Clean invoice extracted ✅")
+        st.success("Invoice cleaned successfully ✅")
 
-        st.text_area("📜 Clean Invoice Text", text, height=500)
+        st.text_area("📜 Clean Invoice Output", result, height=500)
 
         st.download_button(
-            "📥 Download Clean Text",
-            text,
+            "📥 Download Clean Invoice",
+            result,
             file_name="clean_invoice.txt",
             mime="text/plain"
         )
-        
