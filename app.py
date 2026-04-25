@@ -413,3 +413,34 @@ if uploaded_files:
             st.write(f"📄 **{path.name}**")
             with st.spinner("Extracting..."):
                 df, mode, raw_text = process_pdf(path)
+            st.caption(f"Mode: `{mode}` — {len(df)} row(s)")
+
+            if debug_mode:
+                with st.expander(f"📋 Full raw text — {path.name}", expanded=False):
+                    st.text(raw_text)
+
+            if not df.empty:
+                all_data.append(df)
+
+        if all_data:
+            final_df = pd.concat(all_data, ignore_index=True)
+
+            if "Invoice Date" in final_df.columns:
+                final_df["Invoice Date"] = pd.to_datetime(
+                    final_df["Invoice Date"], errors="coerce", dayfirst=True
+                ).dt.strftime("%m/%d/%Y")
+
+            st.success(f"✅ Done! {len(final_df)} total row(s)")
+            st.dataframe(final_df)
+
+            out = BytesIO()
+            final_df.to_excel(out, index=False, engine="openpyxl")
+            out.seek(0)
+            st.download_button(
+                "📥 Download Excel",
+                out,
+                "Invoices.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        else:
+            st.warning("⚠️ No data extracted.")
