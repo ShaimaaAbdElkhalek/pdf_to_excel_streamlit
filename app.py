@@ -1,35 +1,37 @@
 import streamlit as st
 import tempfile
+import re
 from pdf2image import convert_from_path
 import pytesseract
-import re
 
 
 # -----------------------------
-# CLEAN TEXT FUNCTION
+# CLEAN TEXT
 # -----------------------------
 def clean_text(text):
-    # remove weird OCR artifacts
-    text = re.sub(r'[^\w\s\u0600-\u06FF%:.,()/\-]', ' ', text)
+    # keep Arabic + English + numbers only
+    text = re.sub(r'[^\w\s\u0600-\u06FF%:.,()/\-\n]', ' ', text)
 
-    # fix multiple spaces
-    text = re.sub(r'\s+', ' ', text)
+    # normalize spaces
+    text = re.sub(r'[ \t]+', ' ', text)
 
-    return text.strip()
+    # remove empty junk lines
+    lines = [l.strip() for l in text.split("\n") if len(l.strip()) > 1]
+
+    return "\n".join(lines).strip()
 
 
 # -----------------------------
-# OCR FUNCTION (AR + EN)
+# OCR FUNCTION (IMPROVED)
 # -----------------------------
 def pdf_to_text(pdf_path):
-    images = convert_from_path(pdf_path, dpi=350)
+    images = convert_from_path(pdf_path, dpi=400)
 
     full_text = []
 
-    for img in images:
-        # VERY IMPORTANT OCR CONFIG
-        config = r'--oem 3 --psm 6 -l ara+eng'
+    config = r'--oem 3 --psm 6 -l ara+eng'
 
+    for img in images:
         text = pytesseract.image_to_string(img, config=config)
 
         text = clean_text(text)
@@ -43,19 +45,20 @@ def pdf_to_text(pdf_path):
 # -----------------------------
 # STREAMLIT UI
 # -----------------------------
-st.set_page_config(page_title="Arabic + English OCR", layout="wide")
+st.set_page_config(page_title="OCR Arabic + English", layout="wide")
 
-st.title("📄 Clean Arabic + English PDF OCR")
+st.title("📄 PDF OCR Cleaner (Arabic + English)")
 
 uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
 
 if uploaded_file:
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(uploaded_file.read())
-        path = tmp.name
+        pdf_path = tmp.name
 
-    with st.spinner("Reading Arabic + English text..."):
-        text = pdf_to_text(path)
+    with st.spinner("Processing OCR..."):
+        text = pdf_to_text(pdf_path)
 
     if not text.strip():
         st.error("No readable text found 😢")
@@ -67,7 +70,6 @@ if uploaded_file:
         st.download_button(
             "📥 Download Text",
             text,
-            file_name="clean_ocr.txt",
+            file_name="ocr_output.txt",
             mime="text/plain"
         )
-
