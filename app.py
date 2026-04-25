@@ -42,18 +42,12 @@ UNIT_WORDS = {
 
 HEADER_KW =["البند", "الوصف", "العدد", "سعر الوحدة", "الكمية", "الوحدة"]
 
-SUMMARY_KW =[
-    "المجموع", "مدفوع", "الرصيد", "القيمة", "القيمه", "الإجمالي", "الإحمالي", "اإلجمالي", "الاجمالي",
-    "رقم الحساب", "الايبان", "IBAN", "SA08", "Kingdome", "المملكة",
-    "رقم الفاتورة", "تاريخ", "اسم العميل", "الرقم الضريبي", "رقم السجل", "العنوان", "الجوال", "السجل التجاري", "مرتجع",
-]
-
-# تم إضافة عمود Weight لفصل الوزن عن العدد
+# إزالة عمود الـ Weight
 FINAL_COLS =[
     "Invoice Number", "Invoice Date", "Customer Name",
     "Address", "Balance", "Paid",
     "Total before tax", "VAT 15%", "Total after tax",
-    "Unit price", "Quantity", "Weight", "Description", "SKU",
+    "Unit price", "Quantity", "Description", "SKU",
     "Source File",
 ]
 
@@ -101,7 +95,7 @@ def get_text(pdf_path):
     with fitz.open(pdf_path) as doc:
         for page in doc:
             pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
-            img = Image.frombytes("RGB",[pix.width, pix.height], pix.samples)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             ocr_text += pytesseract.image_to_string(img, lang="ara+eng", config="--psm 6") + "\n"
     return ocr_text, "ocr"
 
@@ -113,7 +107,7 @@ def get_ocr_words(pdf_path):
     except Exception:
         with fitz.open(pdf_path) as doc:
             pix = doc[0].get_pixmap(matrix=fitz.Matrix(3, 3))
-        img = Image.frombytes("RGB",[pix.width, pix.height], pix.samples)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     data = pytesseract.image_to_data(
         img, lang="ara+eng", config="--psm 6",
         output_type=pytesseract.Output.DATAFRAME,
@@ -140,7 +134,7 @@ def reconstruct_table_rows(word_df, y_tolerance=15):
     return rows
 
 def get_nums(segment):
-    return [n for n in re.findall(r"[\d,]+\.?\d*", segment) if clean_number(n) not in (0, None) and len(re.sub(r"[,.]", "", n)) <= 8]
+    return[n for n in re.findall(r"[\d,]+\.?\d*", segment) if clean_number(n) not in (0, None) and len(re.sub(r"[,.]", "", n)) <= 8]
 
 def parse_item_line(line):
     eng_matches = list(re.finditer(r"[A-Za-z]{2,}", line))
@@ -163,7 +157,7 @@ def parse_item_line(line):
         pack_bracket.add(m.group(1))
 
     if len(all_nums) == 2:
-        candidates = [n for n in all_nums if n not in pack_bracket]
+        candidates =[n for n in all_nums if n not in pack_bracket]
         row_total = None
     else:
         candidates = [n for n in all_nums[:-1] if n not in pack_bracket]
@@ -172,45 +166,31 @@ def parse_item_line(line):
 
     if not candidates: return None
 
-    qty = None       # العدد (الكراتين)
-    weight = None    # الوزن (الكيلو)
+    qty = None
     unit_price = None
     
-    cand_vals =[clean_number(n) for n in candidates if clean_number(n)]
+    cand_vals = [clean_number(n) for n in candidates if clean_number(n)]
     matched = False
 
-    # خوارزمية رياضية للتعرف على العدد والوزن والسعر
+    # المطابقة الرياضية الذكية لاختيار الكمية والسعر وتجاهل الأرقام الأخرى
     if row_total and row_total > 0:
         for i, v1 in enumerate(cand_vals):
             for j, v2 in enumerate(cand_vals):
                 if i == j: continue
-                # نبحث عن الرقمين اللذين حاصل ضربهما يساوي المجموع (مع هامش خطأ بسيط)
                 if abs(v1 * v2 - row_total) / row_total < 0.05:
-                    leftovers =[v for idx, v in enumerate(cand_vals) if idx not in (i, j)]
-
-                    if leftovers:
-                        # في حال وجود 3 أرقام (العدد، الوزن، السعر)
-                        qty = leftovers[0]             # الرقم المتبقي هو العدد!
-                        weight = max(v1, v2)           # الوزن غالباً يكون الأكبر
-                        unit_price = min(v1, v2)       # السعر غالباً يكون الأصغر
+                    if i < j:
+                        qty, unit_price = v1, v2
                     else:
-                        # في حال وجود رقمين فقط (العدد، السعر) بدون وزن
-                        if i < j:
-                            qty, unit_price = v1, v2
-                        else:
-                            qty, unit_price = v2, v1
-                            
+                        qty, unit_price = v2, v1
                     matched = True
                     break
             if matched: break
 
-    # في حال فشل المعادلة، نوزع الأرقام بناءً على الترتيب
+    # إذا فشلت المعادلة نختار أول وآخر رقم كحل بديل
     if not matched:
         if len(cand_vals) >= 2:
             qty = cand_vals[0]
-            unit_price = cand_vals[1]
-            if len(cand_vals) >= 3:
-                weight = cand_vals[2]
+            unit_price = cand_vals[-1]
         elif len(cand_vals) == 1:
             unit_price = cand_vals[0]
 
@@ -237,65 +217,63 @@ def parse_item_line(line):
                 break
 
     if not (sku or desc): return None
-    return {"SKU": sku, "Description": desc, "Quantity": qty, "Weight": weight, "Unit price": unit_price}
+    return {"SKU": sku, "Description": desc, "Quantity": qty, "Unit price": unit_price}
 
 def extract_items_positional(word_df, text):
     items =[]
+    
+    # محاولة الاستخراج بدقة عبر الإحداثيات
     if not word_df.empty:
         rows = reconstruct_table_rows(word_df)
-        header_idx, summary_idx = None, None
-        for i, row in enumerate(rows):
-            if any(kw in row["text"] for kw in HEADER_KW):
-                header_idx = i
-                break
-        start = (header_idx + 1) if header_idx is not None else 0
-        for i, row in enumerate(rows[start:], start=start):
-            if any(kw in row["text"] for kw in SUMMARY_KW):
-                summary_idx = i
-                break
-        if header_idx is not None and summary_idx is not None:
-            for row in rows[header_idx + 1: summary_idx]:
-                t = row["text"].strip()
-                if not t or any(kw in t for kw in SUMMARY_KW): continue
-                parsed = parse_item_line(t)
-                if parsed: items.append(parsed)
+        for row in rows:
+            t = row["text"].strip()
+            # استبعاد سطور العناوين والمجاميع
+            if not t or any(kw in t for kw in HEADER_KW) or any(kw in t for kw in["المجموع", "القيمة", "الإجمالي", "الرصيد"]): 
+                continue
+            parsed = parse_item_line(t)
+            if parsed: items.append(parsed)
 
+    # إذا فشل الاستخراج (مثل حالة الفاتورة 02445)، نبحث في النص بالكامل سطرًا سطرًا
     if not items:
-        in_table = False
+        skip_kws =["العنوان", "الضريبي", "السجل", "تاريخ", "العميل", "فاكس", "هاتف", "جوال"]
+        stop_kws =["المجموع", "القيمة", "الإجمالي", "الرصيد", "مدفوع", "الايبان", "حساب"]
+        
         for line in text.split("\n"):
             line = line.strip()
             if not line: continue
-            if any(h in line for h in HEADER_KW):
-                in_table = True
+            
+            if any(kw in line for kw in stop_kws):
+                break # نهاية المنتجات
+                
+            if any(kw in line for kw in skip_kws) or any(kw in line for kw in HEADER_KW):
                 continue
-            if in_table and any(kw in line for kw in SUMMARY_KW): break
-            if not in_table: continue
+                
             parsed = parse_item_line(line)
-            if parsed: items.append(parsed)
+            if parsed: 
+                items.append(parsed)
 
     return items
 
 def is_summary_row(vals):
-    return any(kw in " ".join(vals) for kw in SUMMARY_KW)
+    return any(kw in " ".join(vals) for kw in["المجموع", "مدفوع", "الرصيد", "القيمة", "الإجمالي", "الايبان", "الحساب"])
 
 def extract_items_native(pdf_path):
     items =[]
     try:
         with pdfplumber.open(pdf_path) as pdf:
             for page in pdf.pages:
-                for table in (page.extract_tables() or []):
+                for table in (page.extract_tables() or[]):
                     for row in table:
                         if not row: continue
-                        vals =[str(c).strip() if c else "" for c in row]
+                        vals = [str(c).strip() if c else "" for c in row]
                         if is_summary_row(vals): continue
-                        num_cells = [v for v in vals if re.sub(r"[,.\s]", "", v).isdigit() and 1 <= len(re.sub(r"[,.\s]", "", v)) <= 8]
+                        num_cells =[v for v in vals if re.sub(r"[,.\s]", "", v).isdigit() and 1 <= len(re.sub(r"[,.\s]", "", v)) <= 8]
                         if len(num_cells) < 2: continue
                         raw_sku  = reshape(vals[5]) if len(vals) > 5 else ""
                         raw_desc = reshape(vals[4]) if len(vals) > 4 else ""
                         items.append({
                             "Unit price": clean_number(vals[2]) if len(vals) > 2 else None,
                             "Quantity": clean_number(vals[3]) if len(vals) > 3 else None,
-                            "Weight": None,
                             "Description": raw_desc,
                             "SKU": clean_sku(raw_sku),
                         })
@@ -320,7 +298,7 @@ def extract_metadata(pdf_path, text):
     if m_date: inv_date = m_date.group(1).strip()
 
     address = ""
-    m_add = re.search(r'العنوان\s*:\s*(.+?)(?=\n\s*05|\n\s*\d{10}|\n\s*البند|\n\s*المجموع|05\d{8})', text, re.DOTALL)
+    m_add = re.search(r'العنوان\s*:\s*(.+?)(?=\n\s*05|\n\s*\d{10}|\n\s*البند|\n\s*المجموع|05\d{8}|فيل)', text, re.DOTALL)
     if m_add:
         address = m_add.group(1).replace('\n', ' ').strip()
         address = re.sub(r'\s*\d{10}\s*$', '', address).strip()
@@ -345,7 +323,6 @@ def extract_metadata(pdf_path, text):
         
         if not tb or abs(tb - expected_tb) > 2:
             tb = expected_tb
-            
         if not vat or abs(vat - expected_vat) > 2:
             vat = expected_vat
 
@@ -400,9 +377,9 @@ def process_pdf(pdf_path):
             unique_items.append(item)
 
     if not unique_items:
-        unique_items =[{"Unit price": None, "Quantity": None, "Weight": None, "Description": "", "SKU": ""}]
+        unique_items =[{"Unit price": None, "Quantity": None, "Description": "", "SKU": ""}]
 
-    rows = [{**meta, **item} for item in unique_items]
+    rows =[{**meta, **item} for item in unique_items]
     return pd.DataFrame(rows).reindex(columns=FINAL_COLS), mode, text
 
 # =====================
@@ -436,34 +413,3 @@ if uploaded_files:
             st.write(f"📄 **{path.name}**")
             with st.spinner("Extracting..."):
                 df, mode, raw_text = process_pdf(path)
-            st.caption(f"Mode: `{mode}` — {len(df)} row(s)")
-
-            if debug_mode:
-                with st.expander(f"📋 Full raw text — {path.name}", expanded=False):
-                    st.text(raw_text)
-
-            if not df.empty:
-                all_data.append(df)
-
-        if all_data:
-            final_df = pd.concat(all_data, ignore_index=True)
-
-            if "Invoice Date" in final_df.columns:
-                final_df["Invoice Date"] = pd.to_datetime(
-                    final_df["Invoice Date"], errors="coerce", dayfirst=True
-                ).dt.strftime("%m/%d/%Y")
-
-            st.success(f"✅ Done! {len(final_df)} total row(s)")
-            st.dataframe(final_df)
-
-            out = BytesIO()
-            final_df.to_excel(out, index=False, engine="openpyxl")
-            out.seek(0)
-            st.download_button(
-                "📥 Download Excel",
-                out,
-                "Invoices.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        else:
-            st.warning("⚠️ No data extracted.")
