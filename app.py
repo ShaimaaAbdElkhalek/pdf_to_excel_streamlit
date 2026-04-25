@@ -8,7 +8,7 @@ from io import BytesIO
 
 
 # -----------------------------
-# OCR
+# OCR FUNCTION
 # -----------------------------
 def extract_text(pdf_path):
     images = convert_from_path(pdf_path, dpi=400)
@@ -23,31 +23,45 @@ def extract_text(pdf_path):
 
 
 # -----------------------------
-# SMART FIELD EXTRACTION
+# SAFE FIND FUNCTION (FIXED)
+# -----------------------------
+def find(pattern, text):
+    match = re.search(pattern, text)
+    if not match:
+        return ""
+
+    # safe: handle groups or full match
+    try:
+        return match.group(1).strip()
+    except:
+        return match.group(0).strip()
+
+
+# -----------------------------
+# FIELD EXTRACTION (FIXED)
 # -----------------------------
 def extract_fields(text):
 
-    def find(pattern):
-        match = re.search(pattern, text)
-        return match.group(1).strip() if match else ""
-
     data = {
-        "Invoice Number": find(r"الفاتورة\s*[:\-]?\s*(\d+)"),
-        "Customer Name": find(r"اسم العميل\s*[:\-]?\s*([^\n]+)"),
-        "VAT Number": find(r"الرقم الضريبي\s*[:\-]?\s*([0-9]+)"),
-        "CR Number": find(r"رقم السجل\s*[:\-]?\s*([0-9\- ]+)"),
-        "Phone": find(r"رقم الجوال\s*[:\-]?\s*([0-9]+)"),
-        "Total": find(r"المجموع\s*([0-9,\.]+)"),
-        "VAT Value": find(r"القيمة المضافة\s*([0-9,\.]+)"),
-        "Grand Total": find(r"الإحمالي\s*([0-9,\.]+)"),
-        "IBAN": find(r"SA[0-9A-Z]+"),
+        "Invoice Number": find(r"الفاتورة\s*[:\-]?\s*(\d+)", text),
+        "Customer Name": find(r"اسم العميل\s*[:\-]?\s*([^\n]+)", text),
+        "VAT Number": find(r"الرقم الضريبي\s*[:\-]?\s*([0-9]+)", text),
+        "CR Number": find(r"رقم السجل\s*[:\-]?\s*([0-9\- ]+)", text),
+        "Phone": find(r"رقم الجوال\s*[:\-]?\s*([0-9]+)", text),
+
+        "Total": find(r"المجموع\s*([0-9,\.]+)", text),
+        "VAT Value": find(r"القيمة المضافة\s*([0-9,\.]+)", text),
+        "Grand Total": find(r"الإحمالي\s*([0-9,\.]+)", text),
+
+        # FIXED IBAN (no crash)
+        "IBAN": find(r"(SA[0-9A-Z]+)", text),
     }
 
     return pd.DataFrame([data])
 
 
 # -----------------------------
-# CLEAN TEXT VIEW
+# CLEAN TEXT
 # -----------------------------
 def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
@@ -57,30 +71,30 @@ def clean_text(text):
 # -----------------------------
 # STREAMLIT UI
 # -----------------------------
-st.set_page_config(page_title="Invoice AI Parser", layout="wide")
+st.set_page_config(page_title="Invoice AI FIXED", layout="wide")
 
-st.title("📄 Invoice AI Parser (Fix for messy OCR)")
+st.title("📄 Invoice AI Parser (FIXED VERSION)")
 
-file = st.file_uploader("Upload PDF", type=["pdf"])
+uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
 
-if file:
+if uploaded_file:
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(file.read())
-        path = tmp.name
+        tmp.write(uploaded_file.read())
+        pdf_path = tmp.name
 
-    with st.spinner("Reading invoice..."):
+    with st.spinner("Processing OCR..."):
 
-        raw_text = extract_text(path)
-        clean = clean_text(raw_text)
+        raw_text = extract_text(pdf_path)
+        cleaned_text = clean_text(raw_text)
         df = extract_fields(raw_text)
 
     # ---------------- TEXT ----------------
     st.subheader("📜 OCR Text")
-    st.text_area("Raw Text", clean, height=300)
+    st.text_area("Raw OCR Output", cleaned_text, height=300)
 
-    # ---------------- STRUCTURED DATA ----------------
-    st.subheader("📊 Extracted Invoice Data")
+    # ---------------- TABLE ----------------
+    st.subheader("📊 Extracted Data")
     st.dataframe(df)
 
     # ---------------- DOWNLOAD ----------------
