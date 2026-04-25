@@ -42,7 +42,12 @@ UNIT_WORDS = {
 
 HEADER_KW =["البند", "الوصف", "العدد", "سعر الوحدة", "الكمية", "الوحدة"]
 
-# إزالة عمود الـ Weight
+# كلمات إذا ظهرت، الكود يتوقف عن قراءة المنتجات (نهاية الجدول)
+STOP_KWS =["المجموع", "القيمة", "الإجمالي", "الإحمالي", "اإلجمالي", "الاجمالي", "الرصيد", "مدفوع", "الايبان", "الحساب", "مرتجع"]
+
+# كلمات إذا ظهرت يتم تجاهل السطر تماماً (لمنع قراءة التواريخ والعناوين كمنتجات)
+SKIP_KWS =["العنوان", "الضريبي", "السجل", "تاريخ", "العميل", "فاكس", "هاتف", "جوال", "إلى", "رقم الفاتورة", "رقم الغاتورة", "الفاتورة", "الغاتورة"]
+
 FINAL_COLS =[
     "Invoice Number", "Invoice Date", "Customer Name",
     "Address", "Balance", "Paid",
@@ -134,7 +139,7 @@ def reconstruct_table_rows(word_df, y_tolerance=15):
     return rows
 
 def get_nums(segment):
-    return[n for n in re.findall(r"[\d,]+\.?\d*", segment) if clean_number(n) not in (0, None) and len(re.sub(r"[,.]", "", n)) <= 8]
+    return [n for n in re.findall(r"[\d,]+\.?\d*", segment) if clean_number(n) not in (0, None) and len(re.sub(r"[,.]", "", n)) <= 8]
 
 def parse_item_line(line):
     eng_matches = list(re.finditer(r"[A-Za-z]{2,}", line))
@@ -169,10 +174,9 @@ def parse_item_line(line):
     qty = None
     unit_price = None
     
-    cand_vals = [clean_number(n) for n in candidates if clean_number(n)]
+    cand_vals =[clean_number(n) for n in candidates if clean_number(n)]
     matched = False
 
-    # المطابقة الرياضية الذكية لاختيار الكمية والسعر وتجاهل الأرقام الأخرى
     if row_total and row_total > 0:
         for i, v1 in enumerate(cand_vals):
             for j, v2 in enumerate(cand_vals):
@@ -186,7 +190,6 @@ def parse_item_line(line):
                     break
             if matched: break
 
-    # إذا فشلت المعادلة نختار أول وآخر رقم كحل بديل
     if not matched:
         if len(cand_vals) >= 2:
             qty = cand_vals[0]
@@ -222,40 +225,44 @@ def parse_item_line(line):
 def extract_items_positional(word_df, text):
     items =[]
     
-    # محاولة الاستخراج بدقة عبر الإحداثيات
     if not word_df.empty:
         rows = reconstruct_table_rows(word_df)
         for row in rows:
             t = row["text"].strip()
-            # استبعاد سطور العناوين والمجاميع
-            if not t or any(kw in t for kw in HEADER_KW) or any(kw in t for kw in["المجموع", "القيمة", "الإجمالي", "الرصيد"]): 
+            # تجاهل سطور العناوين والنهايات بذكاء
+            if not t or any(kw in t for kw in HEADER_KW) or any(kw in t for kw in STOP_KWS) or any(kw in t for kw in SKIP_KWS): 
                 continue
             parsed = parse_item_line(t)
             if parsed: items.append(parsed)
 
-    # إذا فشل الاستخراج (مثل حالة الفاتورة 02445)، نبحث في النص بالكامل سطرًا سطرًا
     if not items:
-        skip_kws =["العنوان", "الضريبي", "السجل", "تاريخ", "العميل", "فاكس", "هاتف", "جوال"]
-        stop_kws =["المجموع", "القيمة", "الإجمالي", "الرصيد", "مدفوع", "الايبان", "حساب"]
-        
         for line in text.split("\n"):
             line = line.strip()
             if not line: continue
             
-            if any(kw in line for kw in stop_kws):
-                break # نهاية المنتجات
+            # إذا وصلنا للمجاميع، نوقف البحث فوراً
+            if any(kw in line for kw in STOP_KWS):
+                break 
                 
-            if any(kw in line for kw in skip_kws) or any(kw in line for kw in HEADER_KW):
+            # نتخطى العناوين والكلمات المضللة
+            if any(kw in line for kw in SKIP_KWS) or any(kw in line for kw in HEADER_KW):
                 continue
                 
             parsed = parse_item_line(line)
             if parsed: 
                 items.append(parsed)
 
-    return items
+    # تنظيف أخير: حذف أي صف لا يحتوي على وصف أو كود (مثل سطر الإجمالي أو خلافه)
+    valid_items =[]
+    for item in items:
+        if len(item.get("Description", "")) < 3 and len(item.get("SKU", "")) < 3:
+            continue
+        valid_items.append(item)
+
+    return valid_items
 
 def is_summary_row(vals):
-    return any(kw in " ".join(vals) for kw in["المجموع", "مدفوع", "الرصيد", "القيمة", "الإجمالي", "الايبان", "الحساب"])
+    return any(kw in " ".join(vals) for kw in STOP_KWS)
 
 def extract_items_native(pdf_path):
     items =[]
@@ -265,7 +272,7 @@ def extract_items_native(pdf_path):
                 for table in (page.extract_tables() or[]):
                     for row in table:
                         if not row: continue
-                        vals = [str(c).strip() if c else "" for c in row]
+                        vals =[str(c).strip() if c else "" for c in row]
                         if is_summary_row(vals): continue
                         num_cells =[v for v in vals if re.sub(r"[,.\s]", "", v).isdigit() and 1 <= len(re.sub(r"[,.\s]", "", v)) <= 8]
                         if len(num_cells) < 2: continue
@@ -298,7 +305,7 @@ def extract_metadata(pdf_path, text):
     if m_date: inv_date = m_date.group(1).strip()
 
     address = ""
-    m_add = re.search(r'العنوان\s*:\s*(.+?)(?=\n\s*05|\n\s*\d{10}|\n\s*البند|\n\s*المجموع|05\d{8}|فيل)', text, re.DOTALL)
+    m_add = re.search(r'العنوان\s*:\s*(.+?)(?=\n\s*05|\n\s*\d{10}|\n\s*البند|\n\s*المجموع|05\d{8}|فيل|كبدة)', text, re.DOTALL)
     if m_add:
         address = m_add.group(1).replace('\n', ' ').strip()
         address = re.sub(r'\s*\d{10}\s*$', '', address).strip()
@@ -321,10 +328,8 @@ def extract_metadata(pdf_path, text):
         expected_tb = round(ta / 1.15, 2)
         expected_vat = round(ta - expected_tb, 2)
         
-        if not tb or abs(tb - expected_tb) > 2:
-            tb = expected_tb
-        if not vat or abs(vat - expected_vat) > 2:
-            vat = expected_vat
+        if not tb or abs(tb - expected_tb) > 2: tb = expected_tb
+        if not vat or abs(vat - expected_vat) > 2: vat = expected_vat
 
     elif tb:
         ta = round(tb * 1.15, 2)
@@ -377,20 +382,15 @@ def process_pdf(pdf_path):
             unique_items.append(item)
 
     if not unique_items:
-        unique_items =[{"Unit price": None, "Quantity": None, "Description": "", "SKU": ""}]
+        unique_items = [{"Unit price": None, "Quantity": None, "Description": "", "SKU": ""}]
 
-    rows =[{**meta, **item} for item in unique_items]
+    rows = [{**meta, **item} for item in unique_items]
     return pd.DataFrame(rows).reindex(columns=FINAL_COLS), mode, text
 
-# =====================
-# Streamlit App UI
-# =====================
 st.set_page_config(page_title="Invoice Extractor", layout="wide")
 st.title("📄 Invoice Extractor — PDF to Excel")
 
-uploaded_files = st.file_uploader(
-    "Upload PDF or ZIP files", type=["pdf", "zip"], accept_multiple_files=True
-)
+uploaded_files = st.file_uploader("Upload PDF or ZIP files", type=["pdf", "zip"], accept_multiple_files=True)
 debug_mode = st.checkbox("🔍 Show full raw extracted text", value=False)
 
 if uploaded_files:
