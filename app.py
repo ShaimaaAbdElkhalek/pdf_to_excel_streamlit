@@ -1,7 +1,6 @@
 # streamlit_app.py
 
 import streamlit as st
-import os
 import fitz  # PyMuPDF
 import pdfplumber
 import pandas as pd
@@ -13,11 +12,9 @@ from io import BytesIO
 import arabic_reshaper
 from bidi.algorithm import get_display
 
-# 🔥 NEW IMPORTS (OCR)
+# OCR
 import pytesseract
 from pdf2image import convert_from_path
-import cv2
-import numpy as np
 
 # =========================
 # Arabic Helpers
@@ -32,7 +29,17 @@ def reshape_arabic_text(text):
         return text
 
 # =========================
-# OCR FUNCTION 🔥
+# Normalize OCR Text 🔥
+# =========================
+
+def normalize_text(text):
+    text = text.replace("ـ", "")
+    text = text.replace("٬", "").replace("٫", ".")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+# =========================
+# OCR FUNCTION
 # =========================
 
 def ocr_pdf(pdf_path):
@@ -40,20 +47,34 @@ def ocr_pdf(pdf_path):
     images = convert_from_path(pdf_path, dpi=300)
 
     for img in images:
-        img = np.array(img)
-
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
-
         text = pytesseract.image_to_string(
-            thresh,
+            img,
             lang="ara+eng",
-            config="--psm 6"
+            config="--oem 3 --psm 6"
         )
-
         text_pages.append(text)
 
     return "\n".join(text_pages)
+
+# =========================
+# Smart Field Extraction 🔥
+# =========================
+
+def find_field(text, keyword_pattern):
+    text = normalize_text(text)
+
+    pattern = rf"{keyword_pattern}\s*[:\-]?\s*(.{{0,60}})"
+    match = re.search(pattern, text)
+
+    if match:
+        value = match.group(1)
+
+        # stop at next keyword-like word
+        value = re.split(r"(رقم|تاريخ|الإجمالي|الضريبة|المبلغ)", value)[0]
+
+        return value.strip()
+
+    return ""
 
 # =========================
 # Metadata Extraction
@@ -64,31 +85,19 @@ def extract_metadata(pdf_path):
         with fitz.open(pdf_path) as doc:
             full_text = "\n".join([page.get_text() for page in doc])
 
-        # 🔥 OCR fallback
+        # OCR fallback
         if not full_text.strip() or len(full_text.strip()) < 50:
             full_text = ocr_pdf(pdf_path)
 
-        def find_field(text, keyword):
-            pattern = rf"{keyword}[:\s]*([^\n]*)"
-            match = re.search(pattern, text)
-            return match.group(1).strip() if match else ""
-
-        address_part1 = find_field(full_text, "رقم السجل")
-        address_part2 = find_field(full_text, "العنوان")
-
-        raw_customer = find_field(full_text, "فاتورة ضريبية")
-        raw_customer = re.sub(r"اسم العميل.*", "", raw_customer).strip()
-        raw_customer = re.sub(r":.*", "", raw_customer).strip()
-
         metadata = {
-            "Invoice Number": find_field(full_text, "رقم الفاتورة"),
-            "Invoice Date": find_field(full_text, "تاريخ الفاتورة"),
-            "Customer Name": raw_customer,
-            "Address": f"{address_part1} {address_part2}".strip(),
-            "Paid": find_field(full_text, "مدفوع"),
-            "Balance": find_field(full_text, "اإلجمالي"),
-            "Source File": pdf_path.name,
-            "Not Paid": find_field(full_text, "الرصيد المستحق")
+            "Invoice Number": find_field(full_text, r"(رقم الفاتورة|فاتورة رقم|Invoice\s*No)"),
+            "Invoice Date": find_field(full_text, r"(تاريخ الفاتورة|التاريخ|Date)"),
+            "Customer Name": find_field(full_text, r"(اسم العميل|العميل|Customer)"),
+            "Address": find_field(full_text, r"(العنوان)"),
+            "Paid": find_field(full_text, r"(مدفوع|Paid)"),
+            "Balance": find_field(full_text, r"(الإجمالي|Total)"),
+            "Not Paid": find_field(full_text, r"(الرصيد المستحق|Remaining)"),
+            "Source File": pdf_path.name
         }
 
         return metadata
@@ -98,21 +107,6 @@ def extract_metadata(pdf_path):
         return {}
 
 # =========================
-# Table Helpers
-# =========================
-
-def is_data_row(row):
-    return any(str(cell).replace(",", "").replace("٫", ".").replace("٬", ".").replace(" ", "").isdigit() for cell in row)
-
-def fix_shifted_rows(row):
-    if len(row) == 7 and row[3].strip() == "" and row[4].strip() != "":
-        row[3] = row[4]
-        row[4] = row[5]
-        row[5] = row[6]
-        row = row[:6]
-    return row
-
-# =========================
 # Table Extraction
 # =========================
 
@@ -120,47 +114,26 @@ def extract_tables(pdf_path):
     try:
         with pdfplumber.open(pdf_path) as pdf:
             all_data = []
-            extracted_any = False
+            found_tables = False
 
             for page in pdf.pages:
                 tables = page.extract_tables()
 
                 if tables:
-                    extracted_any = True
+                    found_tables = True
 
                 for table in tables:
                     if table:
                         df = pd.DataFrame(table)
                         df = df.dropna(how="all").reset_index(drop=True)
+
                         if df.empty:
                             continue
 
-                        merged_rows = []
-                        temp_row = []
+                        all_data.append(df)
 
-                        for _, row in df.iterrows():
-                            row_values = row.fillna("").astype(str).tolist()
-                            row_values = [reshape_arabic_text(cell) for cell in row_values]
-                            row_values = fix_shifted_rows(row_values)
-
-                            if is_data_row(row_values):
-                                if temp_row:
-                                    combined = [temp_row[0] + " " + row_values[0]] + row_values[1:]
-                                    merged_rows.append(combined)
-                                    temp_row = []
-                                else:
-                                    merged_rows.append(row_values)
-                            else:
-                                temp_row = row_values
-
-                        if merged_rows:
-                            num_cols = len(merged_rows[0])
-                            headers = ["Total before tax", "الكمية", "Unit price", "Quantity", "Description", "SKU", "إضافي"]
-                            df_cleaned = pd.DataFrame(merged_rows, columns=headers[:num_cols])
-                            all_data.append(df_cleaned)
-
-            # 🔥 OCR fallback if no tables found
-            if not extracted_any:
+            # OCR fallback for tables
+            if not found_tables:
                 text = ocr_pdf(pdf_path)
                 lines = text.split("\n")
                 data = []
@@ -168,7 +141,7 @@ def extract_tables(pdf_path):
                 for line in lines:
                     if re.search(r"\d", line):
                         parts = re.split(r"\s{2,}", line)
-                        if len(parts) >= 4:
+                        if len(parts) >= 3:
                             data.append(parts)
 
                 if data:
@@ -199,10 +172,10 @@ def process_pdf(pdf_path):
 # Streamlit UI
 # =========================
 
-st.set_page_config(page_title="Merged Arabic Invoice Extractor", layout="wide")
-st.title("📄 Invoice Extractor Pdf to Excel")
+st.set_page_config(page_title="Invoice Extractor", layout="wide")
+st.title("📄 Arabic Invoice Extractor (OCR Ready)")
 
-uploaded_files = st.file_uploader("Upload PDF files", type=["pdf", "zip"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload PDF or ZIP", type=["pdf", "zip"], accept_multiple_files=True)
 
 if uploaded_files:
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -223,35 +196,31 @@ if uploaded_files:
                 pdf_paths.append(file_path)
 
         all_data = []
+
         for pdf_path in pdf_paths:
             st.write(f"📄 Processing: {pdf_path.name}")
             df = process_pdf(pdf_path)
+
             if not df.empty:
                 all_data.append(df)
 
         if all_data:
             final_df = pd.concat(all_data, ignore_index=True)
 
-            if "Total before tax" in final_df.columns:
-                final_df["Total before tax"] = (
-                    final_df["Total before tax"].astype(str)
-                    .str.replace(r"[^\d.,]", "", regex=True)
-                    .str.replace(",", "", regex=False)
-                    .replace("", None)
-                    .astype(float)
-                )
-                final_df["VAT 15%"] = (final_df["Total before tax"] * 0.15).round(2)
-                final_df["Total after tax"] = (final_df["Total before tax"] + final_df["VAT 15%"]).round(2)
-
+            # Clean numeric fields
             for col in ["Paid", "Balance", "Not Paid"]:
                 if col in final_df.columns:
                     final_df[col] = (
                         final_df[col].astype(str)
-                        .str.replace(r"[^\d.,]", "", regex=True)
-                        .str.replace(",", "", regex=False)
+                        .str.replace(r"[^\d.]", "", regex=True)
                         .replace("", None)
                         .astype(float)
                     )
+
+            if "Total before tax" in final_df.columns:
+                final_df["Total before tax"] = pd.to_numeric(final_df["Total before tax"], errors="coerce")
+                final_df["VAT 15%"] = final_df["Total before tax"] * 0.15
+                final_df["Total after tax"] = final_df["Total before tax"] * 1.15
 
             if "Invoice Date" in final_df.columns:
                 final_df["Invoice Date"] = pd.to_datetime(
@@ -260,28 +229,18 @@ if uploaded_files:
                     dayfirst=True
                 ).dt.strftime("%m/%d/%Y")
 
-            required_columns = [
-                "Invoice Number", "Invoice Date", "Customer Name", "Balance", "Paid", "Address",
-                "Total before tax", "VAT 15%", "Total after tax",
-                "Unit price", "Quantity", "Description", "SKU",
-                "Source File"
-            ]
-
-            final_df = final_df.reindex(columns=required_columns)
-
-            st.success("✅ Extraction & cleaning complete!")
+            st.success("✅ Done!")
             st.dataframe(final_df)
 
             output = BytesIO()
-            final_df.to_excel(output, index=False, engine="openpyxl")
+            final_df.to_excel(output, index=False)
             output.seek(0)
 
             st.download_button(
-                label="📥 Download Excel",
+                "📥 Download Excel",
                 data=output,
-                file_name="Merged_Invoice_Data.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                file_name="Invoices.xlsx"
             )
 
         else:
-            st.warning("⚠️ No data extracted from the uploaded files.")
+            st.warning("⚠️ No data extracted.")
