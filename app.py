@@ -19,12 +19,9 @@ def reshape(text):
         return text
 
 def clean_number(val):
-    """
-    FIX: Added length check to prevent parsing IBANs (SA08...) or Bank Account numbers as amounts.
-    """
     s = re.sub(r"[^\d.]", "", str(val).replace(",", "").replace("\u066c", "").replace("\u066b", "."))
     try:
-        # If the whole number part is more than 10 digits, it's an ID/IBAN/Account, not an amount.
+        # منع قراءة الآيبان أو أرقام الحسابات كقيم مالية
         if len(s.split('.')[0]) > 10:
             return None
         return float(s) if s else None
@@ -289,62 +286,65 @@ def extract_items_native(pdf_path):
     return items
 
 def extract_metadata(pdf_path, text):
-    """
-    FIX: Rewritten completely to use regex parsing instead of blind guessing.
-    This guarantees accurate extraction of Totals, Subtotals, and Customer details.
-    """
-    # 1. Customer Name
+    # 1. Customer Name (الاعتماد الأساسي سيكون على اسم الملف لاحقاً)
     cname = ""
-    m_name = re.search(r'اسم العميل\s*:\s*([^\n\d]+)', text)
+    m_name = re.search(r'اسم العميل\s*:\s*(.*?)(?=رقم|التاريخ|الرقم|\n)', text)
     if m_name:
         cname = m_name.group(1).strip()
-        # Clean up OCR garbage that bleeds in
-        cname = re.sub(r'(رقم|الغاتورة|الفاتورة|التجارية”|إلى:|1ك|جوم).*', '', cname).strip()
+        cname = re.sub(r'الغاتورة.*|الفاتورة.*|الفغاتورة.*|إلى.*', '', cname).strip()
 
     # 2. Invoice Number
     inv_num = ""
-    m_inv = re.search(r'(?:رقم الغاتورة|رقم الفاتورة)\s*(\d+)', text)
+    m_inv = re.search(r'رقم\s*(?:ال[غف]اتورة|الفغاتورة|فاتورة)\s*[:\-]?\s*(\d{4,6})', text)
+    if not m_inv:
+        m_inv = re.search(r'رقم.*?\s+(\d{4,6})\b', text)
     if m_inv: inv_num = m_inv.group(1).strip()
 
     # 3. Invoice Date
     inv_date = ""
-    m_date = re.search(r'تاريخ (?:الفاتورة|الغاتورة)\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})', text)
+    m_date = re.search(r'تاريخ.*?\s+(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})', text)
     if m_date: inv_date = m_date.group(1).strip()
 
     # 4. Address
     address = ""
-    m_add = re.search(r'العنوان\s*:\s*(.+?)(?=\n05|\n\d{10}|\nالبند|المجموع)', text, re.DOTALL)
+    m_add = re.search(r'العنوان\s*:\s*(.+?)(?=\n\s*05|\n\s*\d{10}|\n\s*البند|\n\s*المجموع|05\d{8})', text, re.DOTALL)
     if m_add:
         address = m_add.group(1).replace('\n', ' ').strip()
         address = re.sub(r'\s*\d{10}\s*$', '', address).strip()
 
-    # 5. Financials (Safe Extraction ignoring IBANs)
-    # Strip IBAN and specific account digits out of the text before scanning for money
-    safe_text = re.sub(r'SA\d{22}', '', text)
-    safe_text = re.sub(r'262350077001', '', safe_text)
-
+    # 5. Financials (التصحيح الرياضي التلقائي)
     tb = ta = vat = paid = bal = 0.0
 
-    m_sub = re.search(r'المجموع\s*([\d,]+\.?\d*)', safe_text)
-    if m_sub: tb = clean_number(m_sub.group(1))
+    safe_text = re.sub(r'SA\d{22}', '', text) # حذف الآيبان
+    safe_text = re.sub(r'\b\d{12,}\b', '', safe_text) # حذف أرقام الحسابات الطويلة
 
-    m_tot = re.search(r'الإ[جح]مالي\s*([\d,]+\.?\d*)', safe_text)
+    m_tot = re.search(r'الإ[جح]مالي\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
     if m_tot: ta = clean_number(m_tot.group(1))
 
-    m_vat = re.search(r'(?:القيمة المضافة|المضافة|15%)\s*([\d,]+\.?\d*)', safe_text)
+    m_sub = re.search(r'المجموع\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
+    if m_sub: tb = clean_number(m_sub.group(1))
+
+    m_vat = re.search(r'(?:القيمة المضافة|المضافة|15%)\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
     if m_vat: vat = clean_number(m_vat.group(1))
 
-    m_paid = re.search(r'(?:مدفوع|E9920|Jt)\s*-?([\d,]+\.?\d*)-?', safe_text)
-    if not m_paid:
-        m_paid = re.search(r'([\d,]+\.?\d*)\s*-\s*(?:مدفوع|E9920)', safe_text)
-    if m_paid: paid = clean_number(m_paid.group(1))
+    # === MATH CORRECTION (تصحيح أخطاء الـ OCR بناءً على الضريبة 15٪) ===
+    if ta:
+        expected_tb = round(ta / 1.15, 2)
+        expected_vat = round(ta - expected_tb, 2)
+        
+        # إذا أخطأ البرنامج وقرأ المجموع 470000 بدلاً من 70000 سيقوم بتصحيحها تلقائياً
+        if not tb or abs(tb - expected_tb) > 2:
+            tb = expected_tb
+            
+        if not vat or abs(vat - expected_vat) > 2:
+            vat = expected_vat
 
-    m_bal = re.search(r'الرصيد المستحق\s*([\d,]+\.?\d*)', safe_text)
-    if m_bal: bal = clean_number(m_bal.group(1))
-
-    # Repair missing VAT if OCR missed it but caught total and subtotal
-    if ta and tb and not vat:
+    elif tb:
+        ta = round(tb * 1.15, 2)
         vat = round(ta - tb, 2)
+
+    paid = 0.0
+    bal = ta if ta else 0.0
 
     return {
         "Invoice Number": inv_num,
@@ -372,10 +372,16 @@ def process_pdf(pdf_path):
         if not items:
             items = extract_items_positional(pd.DataFrame(), text)
 
-    # Fallback for customer name if Regex failed
-    if not meta["Customer Name"]:
-        cname = extract_name_from_filename(pdf_path)
-        meta["Customer Name"] = cname
+    # إجبار استخراج اسم العميل من اسم الملف لتجنب تقطيع الأحرف (مثل شركة لألأة النجوم)
+    file_cname = extract_name_from_filename(pdf_path)
+    if file_cname and len(file_cname) > 3:
+        meta["Customer Name"] = file_cname
+
+    # إجبار استخراج رقم الفاتورة من اسم الملف في حال فشل الـ Regex
+    if not meta["Invoice Number"]:
+        m_fname_inv = re.search(r'(\d{4,6})', pdf_path.stem)
+        if m_fname_inv:
+            meta["Invoice Number"] = m_fname_inv.group(1)
 
     seen = set()
     unique_items = []
@@ -392,9 +398,8 @@ def process_pdf(pdf_path):
     return pd.DataFrame(rows).reindex(columns=FINAL_COLS), mode, text
 
 # =====================
-# Streamlit App
+# Streamlit App UI
 # =====================
-
 st.set_page_config(page_title="Invoice Extractor", layout="wide")
 st.title("📄 Invoice Extractor — PDF to Excel")
 
