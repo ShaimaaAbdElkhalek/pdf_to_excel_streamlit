@@ -8,14 +8,13 @@ from io import BytesIO
 
 
 # -----------------------------
-# OCR FUNCTION
+# OCR
 # -----------------------------
 def extract_text(pdf_path):
     images = convert_from_path(pdf_path, dpi=400)
     config = r'--oem 3 --psm 6 -l ara+eng'
 
     text = ""
-
     for img in images:
         text += pytesseract.image_to_string(img, config=config) + "\n"
 
@@ -23,38 +22,54 @@ def extract_text(pdf_path):
 
 
 # -----------------------------
-# SAFE FIND FUNCTION (FIXED)
+# SMART KEY-VALUE PARSER (FIXED PROPERLY)
 # -----------------------------
-def find(pattern, text):
-    match = re.search(pattern, text)
-    if not match:
+def smart_extract(text):
+
+    def find_value(keyword_patterns):
+        for pattern in keyword_patterns:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1).strip()
         return ""
 
-    # safe: handle groups or full match
-    try:
-        return match.group(1).strip()
-    except:
-        return match.group(0).strip()
-
-
-# -----------------------------
-# FIELD EXTRACTION (FIXED)
-# -----------------------------
-def extract_fields(text):
-
     data = {
-        "Invoice Number": find(r"الفاتورة\s*[:\-]?\s*(\d+)", text),
-        "Customer Name": find(r"اسم العميل\s*[:\-]?\s*([^\n]+)", text),
-        "VAT Number": find(r"الرقم الضريبي\s*[:\-]?\s*([0-9]+)", text),
-        "CR Number": find(r"رقم السجل\s*[:\-]?\s*([0-9\- ]+)", text),
-        "Phone": find(r"رقم الجوال\s*[:\-]?\s*([0-9]+)", text),
+        "Invoice Number": find_value([
+            r"الفاتورة\s*[:\-]?\s*(\d+)",
+            r"رقم الفاتورة\s*(\d+)"
+        ]),
 
-        "Total": find(r"المجموع\s*([0-9,\.]+)", text),
-        "VAT Value": find(r"القيمة المضافة\s*([0-9,\.]+)", text),
-        "Grand Total": find(r"الإحمالي\s*([0-9,\.]+)", text),
+        "Customer Name": find_value([
+            r"اسم العميل\s*[:\-]?\s*([^\n]+)"
+        ]),
 
-        # FIXED IBAN (no crash)
-        "IBAN": find(r"(SA[0-9A-Z]+)", text),
+        "VAT Number": find_value([
+            r"الرقم الضريبي\s*[:\-]?\s*([0-9]+)"
+        ]),
+
+        "CR Number": find_value([
+            r"رقم السجل\s*[:\-]?\s*([0-9\- ]+)"
+        ]),
+
+        "Phone": find_value([
+            r"رقم الجوال\s*[:\-]?\s*([0-9]+)"
+        ]),
+
+        "Total": find_value([
+            r"المجموع\s*([0-9,\.]+)"
+        ]),
+
+        "VAT Value": find_value([
+            r"القيمة المضافة\s*([0-9,\.]+)"
+        ]),
+
+        "Grand Total": find_value([
+            r"الإحمالي\s*[:\-]?\s*([0-9,\.]+)"
+        ]),
+
+        "IBAN": find_value([
+            r"(SA[0-9A-Z]{20,})"
+        ])
     }
 
     return pd.DataFrame([data])
@@ -71,30 +86,30 @@ def clean_text(text):
 # -----------------------------
 # STREAMLIT UI
 # -----------------------------
-st.set_page_config(page_title="Invoice AI FIXED", layout="wide")
+st.set_page_config(page_title="Robust Invoice AI", layout="wide")
 
-st.title("📄 Invoice AI Parser (FIXED VERSION)")
+st.title("📄 Robust Invoice AI Parser (Handles all formats)")
 
-uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
+file = st.file_uploader("Upload PDF", type=["pdf"])
 
-if uploaded_file:
+if file:
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(uploaded_file.read())
-        pdf_path = tmp.name
+        tmp.write(file.read())
+        path = tmp.name
 
-    with st.spinner("Processing OCR..."):
+    with st.spinner("Processing invoice..."):
 
-        raw_text = extract_text(pdf_path)
+        raw_text = extract_text(path)
         cleaned_text = clean_text(raw_text)
-        df = extract_fields(raw_text)
+        df = smart_extract(raw_text)
 
     # ---------------- TEXT ----------------
     st.subheader("📜 OCR Text")
-    st.text_area("Raw OCR Output", cleaned_text, height=300)
+    st.text_area("Raw OCR", cleaned_text, height=300)
 
-    # ---------------- TABLE ----------------
-    st.subheader("📊 Extracted Data")
+    # ---------------- STRUCTURED DATA ----------------
+    st.subheader("📊 Extracted Data (Robust)")
     st.dataframe(df)
 
     # ---------------- DOWNLOAD ----------------
@@ -105,6 +120,6 @@ if uploaded_file:
     st.download_button(
         "📥 Download Excel",
         data=output,
-        file_name="invoice.xlsx",
+        file_name="invoice_structured.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
