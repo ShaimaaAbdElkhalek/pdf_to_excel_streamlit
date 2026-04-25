@@ -41,7 +41,7 @@ UNIT_WORDS = {
 }
 
 HEADER_KW =["البند", "الوصف", "العدد", "سعر الوحدة", "الكمية", "الوحدة"]
-STOP_KWS =["المجموع", "القيمة المضافة", "الإجمالي", "الإحمالي", "اإلجمالي", "الاجمالي","الإإحمالي", "الرصيد", "الايبان", "رقم الحساب"]
+STOP_KWS =["المجموع", "القيمة المضافة", "الإجمالي", "الإحمالي", "اإلجمالي", "الاجمالي", "الرصيد", "الايبان", "رقم الحساب", "الإإحمالي"]
 SKIP_KWS =["العنوان", "الضريبي", "السجل", "تاريخ", "العميل", "فاكس", "هاتف", "جوال", "إلى", "رقم الفاتورة", "رقم الغاتورة", "الفاتورة", "الغاتورة", "مدفوع", "مرتجع"]
 
 FINAL_COLS =[
@@ -168,13 +168,11 @@ def reconstruct_table_rows(word_df, y_tolerance=15):
     return rows
 
 def get_nums(segment):
-    # إزالة الفواصل الكبيرة أولاً حتى لا تتقطع الأرقام (مثل 22,680)
     seg_clean = segment.replace(",", "")
     matches = re.findall(r"\b\d+(?:\.\d+)?\b", seg_clean)
     return[n for n in matches if clean_number(n) and clean_number(n) > 0]
 
 def parse_item_line(line, tb_val=0.0):
-    # مسح الأقواس لتجنب تداخل الأرقام مثل (99) أو (510)
     line_clean = re.sub(r"[\(\)\[\]]\s*\d+\s*[\(\)\[\]]", " ", line)
 
     raw_nums = get_nums(line_clean)
@@ -189,7 +187,6 @@ def parse_item_line(line, tb_val=0.0):
             
     if len(cand_floats) < 2: return None
 
-    # حذف الإجمالي من السطر إذا كان موجوداً في النهاية لكي لا نشوش على الكمية والسعر
     if cand_floats[-1] > 100 or len(cand_floats) >= 4:
         cand_floats = cand_floats[:-1]
         valid_strs = valid_strs[:-1]
@@ -199,21 +196,19 @@ def parse_item_line(line, tb_val=0.0):
     qty = None
     unit_price = None
 
-    # 💡 القاعدة الذهبية (التي طلبتها): نبحث عن الرقم ذو العلامة العشرية (السعر) وما قبله هو (الكمية)
+    # 💡 البحث عن السعر بالعلامة العشرية، وما قبله هو الكمية (القاعدة الذهبية)
     decimal_indices =[i for i, s in enumerate(valid_strs) if '.' in s]
     
     if decimal_indices:
-        price_idx = decimal_indices[0] # أول رقم به علامة عشرية
+        price_idx = decimal_indices[0]
         unit_price = cand_floats[price_idx]
         
-        # الرقم الذي يسبقه مباشرة هو العدد/الكمية
         if price_idx > 0:
             qty = cand_floats[price_idx - 1]
         else:
             qty = cand_floats[0]
             
     else:
-        # احتياطي: في حال لم يقرأ الـ OCR النقطة، نفترض الترتيب المنطقي (العدد ثم السعر)
         if len(cand_floats) >= 2:
             qty = cand_floats[-2]
             unit_price = cand_floats[-1]
@@ -226,7 +221,6 @@ def parse_item_line(line, tb_val=0.0):
             qty = int(qty) if float(qty).is_integer() else qty
         except: pass
 
-    # توحيد اسم المنتج بشكل قاطع باستخدام الكتالوج المبرمج مسبقاً
     std_sku, std_desc = standardize_product(line)
     if std_sku:
         sku, desc = std_sku, std_desc
@@ -284,10 +278,13 @@ def extract_metadata(pdf_path, text):
 
     tb = ta = vat = paid = bal = 0.0
 
+    # 💡 تنظيف النص من أرقام البنوك والتواريخ حتى لا تتدخل في المجاميع المالية
     safe_text = re.sub(r'SA\d{22}', '', text)
     safe_text = re.sub(r'\b\d{10,}\b', '', safe_text)
+    safe_text = re.sub(r'\d{1,2}[/\-]\d{1,2}[/\-]\d{4}', '', safe_text) # حذف التواريخ (مثل 2026)
 
-    m_tot = re.search(r'الإ[جح]مالي\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
+    # إضافة الإإحمالي (بالأخطاء الإملائية) للبحث القوي
+    m_tot = re.search(r'(?:الإ[جح]مالي|الإإ[جح]مالي|اإلجمالي|الاجمالي|الإجمالي)\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
     if m_tot: ta = clean_number(m_tot.group(1))
 
     m_sub = re.search(r'المجموع\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
@@ -296,19 +293,26 @@ def extract_metadata(pdf_path, text):
     m_vat = re.search(r'(?:القيمة المضافة|المضافة|15%)\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
     if m_vat: vat = clean_number(m_vat.group(1))
 
+    # 💡 تحديث خوارزمية الإنقاذ لتبحث عن النتيجة الأفضل ولا تتسرع
     if not ta or not tb:
         nums_raw =[clean_number(n) for n in re.findall(r"[\d,]+\.?\d*", safe_text) if clean_number(n) and clean_number(n) > 100]
         unique = sorted(set(nums_raw))
         best_diff = float("inf")
+        best_ta, best_tb = None, None
+        
         for i, small in enumerate(unique):
             for big in unique[i + 1:]:
                 if 1.10 <= big / small <= 1.20:
                     diff = abs((big / small) - 1.15)
                     if diff < best_diff:
                         best_diff = diff
-                        if not tb: tb = small
-                        if not ta: ta = big
+                        best_tb = small
+                        best_ta = big
+                        
+        if not tb and best_tb: tb = best_tb
+        if not ta and best_ta: ta = best_ta
 
+    # التأكيد النهائي
     if ta:
         expected_tb = round(ta / 1.15, 2)
         expected_vat = round(ta - expected_tb, 2)
