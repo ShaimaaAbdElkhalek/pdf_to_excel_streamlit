@@ -42,11 +42,11 @@ UNIT_WORDS = {
 
 HEADER_KW =["البند", "الوصف", "العدد", "سعر الوحدة", "الكمية", "الوحدة"]
 
-# كلمات إذا ظهرت، الكود يتوقف عن قراءة المنتجات (نهاية الجدول)
-STOP_KWS =["المجموع", "القيمة", "الإجمالي", "الإحمالي", "اإلجمالي", "الاجمالي", "الرصيد", "مدفوع", "الايبان", "الحساب", "مرتجع"]
+# الكلمات التي تنهي قراءة المنتجات
+STOP_KWS =["المجموع", "القيمة المضافة", "الإجمالي", "الإحمالي", "اإلجمالي", "الاجمالي", "الرصيد", "الايبان", "رقم الحساب"]
 
-# كلمات إذا ظهرت يتم تجاهل السطر تماماً (لمنع قراءة التواريخ والعناوين كمنتجات)
-SKIP_KWS =["العنوان", "الضريبي", "السجل", "تاريخ", "العميل", "فاكس", "هاتف", "جوال", "إلى", "رقم الفاتورة", "رقم الغاتورة", "الفاتورة", "الغاتورة"]
+# الكلمات التي يتم تخطيها لمنع الأخطاء
+SKIP_KWS =["العنوان", "الضريبي", "السجل", "تاريخ", "العميل", "فاكس", "هاتف", "جوال", "إلى", "رقم الفاتورة", "رقم الغاتورة", "الفاتورة", "الغاتورة", "مدفوع", "مرتجع"]
 
 FINAL_COLS =[
     "Invoice Number", "Invoice Date", "Customer Name",
@@ -100,7 +100,7 @@ def get_text(pdf_path):
     with fitz.open(pdf_path) as doc:
         for page in doc:
             pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            img = Image.frombytes("RGB",[pix.width, pix.height], pix.samples)
             ocr_text += pytesseract.image_to_string(img, lang="ara+eng", config="--psm 6") + "\n"
     return ocr_text, "ocr"
 
@@ -112,7 +112,7 @@ def get_ocr_words(pdf_path):
     except Exception:
         with fitz.open(pdf_path) as doc:
             pix = doc[0].get_pixmap(matrix=fitz.Matrix(3, 3))
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        img = Image.frombytes("RGB",[pix.width, pix.height], pix.samples)
     data = pytesseract.image_to_data(
         img, lang="ara+eng", config="--psm 6",
         output_type=pytesseract.Output.DATAFRAME,
@@ -177,6 +177,7 @@ def parse_item_line(line):
     cand_vals =[clean_number(n) for n in candidates if clean_number(n)]
     matched = False
 
+    # 1. المحاولة الأولى: المطابقة الرياضية
     if row_total and row_total > 0:
         for i, v1 in enumerate(cand_vals):
             for j, v2 in enumerate(cand_vals):
@@ -190,11 +191,18 @@ def parse_item_line(line):
                     break
             if matched: break
 
+    # 2. المحاولة الثانية: الفلترة الذكية للكسور العشرية (لحل مشكلة فاتورة 2567)
     if not matched:
-        if len(cand_vals) >= 2:
+        first_whole = next((clean_number(n) for n in candidates if "." not in n and clean_number(n)), None)
+        first_decimal = next((clean_number(n) for n in candidates if "." in n and clean_number(n)), None)
+        
+        if first_whole and first_decimal:
+            qty = first_whole
+            unit_price = first_decimal
+        elif len(cand_vals) >= 2:
             qty = cand_vals[0]
-            unit_price = cand_vals[-1]
-        elif len(cand_vals) == 1:
+            unit_price = cand_vals[1]
+        elif cand_vals:
             unit_price = cand_vals[0]
 
     all_eng = re.findall(r"[A-Za-z]{2,}", line)
@@ -229,9 +237,16 @@ def extract_items_positional(word_df, text):
         rows = reconstruct_table_rows(word_df)
         for row in rows:
             t = row["text"].strip()
-            # تجاهل سطور العناوين والنهايات بذكاء
-            if not t or any(kw in t for kw in HEADER_KW) or any(kw in t for kw in STOP_KWS) or any(kw in t for kw in SKIP_KWS): 
+            if not t: continue
+            
+            # إيقاف البحث إذا وصلنا للنهاية بشرط ألا يكون سطر العناوين
+            if any(kw in t for kw in STOP_KWS):
+                if not any(h in t for h in HEADER_KW):
+                    break
+                    
+            if any(kw in t for kw in HEADER_KW) or any(kw in t for kw in SKIP_KWS): 
                 continue
+                
             parsed = parse_item_line(t)
             if parsed: items.append(parsed)
 
@@ -240,11 +255,11 @@ def extract_items_positional(word_df, text):
             line = line.strip()
             if not line: continue
             
-            # إذا وصلنا للمجاميع، نوقف البحث فوراً
+            # إيقاف البحث إذا وصلنا للنهاية بشرط ألا يكون سطر العناوين
             if any(kw in line for kw in STOP_KWS):
-                break 
+                if not any(h in line for h in HEADER_KW):
+                    break 
                 
-            # نتخطى العناوين والكلمات المضللة
             if any(kw in line for kw in SKIP_KWS) or any(kw in line for kw in HEADER_KW):
                 continue
                 
@@ -252,7 +267,7 @@ def extract_items_positional(word_df, text):
             if parsed: 
                 items.append(parsed)
 
-    # تنظيف أخير: حذف أي صف لا يحتوي على وصف أو كود (مثل سطر الإجمالي أو خلافه)
+    # تنظيف أخير
     valid_items =[]
     for item in items:
         if len(item.get("Description", "")) < 3 and len(item.get("SKU", "")) < 3:
@@ -305,7 +320,7 @@ def extract_metadata(pdf_path, text):
     if m_date: inv_date = m_date.group(1).strip()
 
     address = ""
-    m_add = re.search(r'العنوان\s*:\s*(.+?)(?=\n\s*05|\n\s*\d{10}|\n\s*البند|\n\s*المجموع|05\d{8}|فيل|كبدة)', text, re.DOTALL)
+    m_add = re.search(r'العنوان\s*:\s*(.+?)(?=\n\s*05|\n\s*\d{10}|\n\s*البند|\n\s*المجموع|05\d{8}|فيل|كبدة|عجل|فخده)', text, re.DOTALL)
     if m_add:
         address = m_add.group(1).replace('\n', ' ').strip()
         address = re.sub(r'\s*\d{10}\s*$', '', address).strip()
@@ -382,9 +397,9 @@ def process_pdf(pdf_path):
             unique_items.append(item)
 
     if not unique_items:
-        unique_items = [{"Unit price": None, "Quantity": None, "Description": "", "SKU": ""}]
+        unique_items =[{"Unit price": None, "Quantity": None, "Description": "", "SKU": ""}]
 
-    rows = [{**meta, **item} for item in unique_items]
+    rows =[{**meta, **item} for item in unique_items]
     return pd.DataFrame(rows).reindex(columns=FINAL_COLS), mode, text
 
 st.set_page_config(page_title="Invoice Extractor", layout="wide")
