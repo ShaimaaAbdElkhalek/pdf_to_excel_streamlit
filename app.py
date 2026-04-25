@@ -6,70 +6,89 @@ import pytesseract
 
 
 # -----------------------------
-# CLEAN TEXT
+# SMART CLEANING (IMPORTANT)
 # -----------------------------
-def clean_text(text):
-    # keep Arabic + English + numbers only
-    text = re.sub(r'[^\w\s\u0600-\u06FF%:.,()/\-\n]', ' ', text)
+def smart_clean(lines):
+    cleaned = []
 
-    # normalize spaces
-    text = re.sub(r'[ \t]+', ' ', text)
+    for line in lines:
+        line = line.strip()
 
-    # remove empty junk lines
-    lines = [l.strip() for l in text.split("\n") if len(l.strip()) > 1]
+        if not line:
+            continue
 
-    return "\n".join(lines).strip()
+        # remove pure garbage lines (numbers only / single chars)
+        if re.fullmatch(r'[\d\s\-\.:,()%]+', line):
+            continue
+
+        # remove OCR noise fragments
+        if len(line) < 3:
+            continue
+
+        # keep Arabic + English + numbers only
+        line = re.sub(r'[^\w\s\u0600-\u06FF%:.,()/\-\+]', ' ', line)
+
+        # normalize spaces
+        line = re.sub(r'\s+', ' ', line).strip()
+
+        cleaned.append(line)
+
+    return cleaned
 
 
 # -----------------------------
-# OCR FUNCTION (IMPROVED)
+# OCR FUNCTION
 # -----------------------------
 def pdf_to_text(pdf_path):
     images = convert_from_path(pdf_path, dpi=400)
 
-    full_text = []
+    all_pages = []
 
     config = r'--oem 3 --psm 6 -l ara+eng'
 
     for img in images:
         text = pytesseract.image_to_string(img, config=config)
 
-        text = clean_text(text)
+        lines = text.split("\n")
 
-        if text:
-            full_text.append(text)
+        clean_lines = smart_clean(lines)
 
-    return "\n\n".join(full_text)
+        if clean_lines:
+            all_pages.append("\n".join(clean_lines))
+
+    return "\n\n".join(all_pages)
 
 
 # -----------------------------
 # STREAMLIT UI
 # -----------------------------
-st.set_page_config(page_title="OCR Arabic + English", layout="wide")
+st.set_page_config(page_title="Smart Invoice OCR", layout="wide")
 
-st.title("📄 PDF OCR Cleaner (Arabic + English)")
+st.title("📄 Smart Invoice OCR (Arabic + English Clean)")
 
-uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
+uploaded_file = st.file_uploader("Upload PDF Invoice", type=["pdf"])
 
 if uploaded_file:
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(uploaded_file.read())
-        pdf_path = tmp.name
+        path = tmp.name
 
-    with st.spinner("Processing OCR..."):
-        text = pdf_to_text(pdf_path)
+    with st.spinner("Reading invoice..."):
+
+        text = pdf_to_text(path)
 
     if not text.strip():
         st.error("No readable text found 😢")
     else:
-        st.success("Done!")
+        st.success("Clean invoice extracted ✅")
 
-        st.text_area("📜 Clean OCR Output", text, height=500)
+        st.text_area("📜 Clean Invoice Text", text, height=500)
 
         st.download_button(
-            "📥 Download Text",
+            "📥 Download Clean Text",
             text,
-            file_name="ocr_output.txt",
+            file_name="clean_invoice.txt",
             mime="text/plain"
         )
+        
