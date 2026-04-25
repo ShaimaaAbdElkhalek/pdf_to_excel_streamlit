@@ -1,9 +1,6 @@
 streamlit
 pdfplumber
-pymupdf
 pandas
 openpyxl
-pillow
-pytesseract
 arabic-reshaper
 python-bidi
