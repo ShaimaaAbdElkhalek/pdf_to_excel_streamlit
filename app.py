@@ -19,7 +19,16 @@ def reshape(text):
         return text
 
 def clean_number(val):
-    s = re.sub(r"[^\d.]", "", str(val).replace(",", "").replace("\u066c", "").replace("\u066b", "."))
+    v_str = str(val).strip()
+    v_str = v_str.replace("\u066c", "").replace("\u066b", ".")
+    
+    # 💡 ذكاء اصطناعي للتعرف على الفاصلة العشرية (مثل 644,00)
+    if re.search(r',\d{1,2}$', v_str):
+        v_str = v_str[::-1].replace(',', '.', 1)[::-1]
+        
+    v_str = v_str.replace(",", "")
+    s = re.sub(r"[^\d.]", "", v_str)
+    
     try:
         if len(s.split('.')[0]) > 10:
             return None
@@ -178,9 +187,8 @@ def reconstruct_table_rows(word_df, y_tolerance=15):
     return rows
 
 def get_nums_with_context(segment):
-    # نستخرج الأرقام كنصوص للحفاظ على العلامة العشرية لتطبيق القاعدة الذهبية
-    seg_clean = segment.replace(",", "")
-    matches = re.finditer(r"\b\d+(?:\.\d+)?\b", seg_clean)
+    # السماح باستخراج الأرقام مع فواصلها لتطبيق القاعدة
+    matches = re.finditer(r"\b\d+(?:[.,]\d+)*\b", segment)
     res =[]
     for m in matches:
         s = m.group(0)
@@ -190,63 +198,70 @@ def get_nums_with_context(segment):
     return res
 
 def parse_item_line(line, tb_val=0.0):
-    # مسح الأقواس لتجنب تداخل الأرقام مثل (99) أو (510)
     line_clean = re.sub(r"[\(\)\[\]]\s*\d+(?:\.\d+)?\s*[\(\)\[\]]", " ", line)
+    nums = get_nums_with_context(line_clean)
+    
+    if len(nums) < 2: return None
 
-    raw_nums = get_nums_with_context(line_clean)
-    if len(raw_nums) < 2: return None
-
-    # مسح المجموع من السطر إذا كان موجوداً في النهاية لكي لا نشوش على الكمية والسعر
-    if raw_nums[-1][1] > 100 and len(raw_nums) >= 3 and raw_nums[-1][1] > raw_nums[-2][1] * 1.5:
-        raw_nums = raw_nums[:-1]
+    # 💡 1. حذف الإجمالي (Row Total) لكي لا يختلط بالكمية أو السعر
+    total_idx_to_remove = -1
+    for i, (s1, v1) in enumerate(nums):
+        for j, (s2, v2) in enumerate(nums):
+            if i >= j: continue
+            for k, (s3, v3) in enumerate(nums):
+                if k == i or k == j: continue
+                if v3 > 0 and abs((v1 * v2) - v3) / v3 < 0.05:
+                    total_idx_to_remove = k
+                    break
+            if total_idx_to_remove != -1: break
+        if total_idx_to_remove != -1: break
         
-    if len(raw_nums) < 1: return None
+    if total_idx_to_remove != -1:
+        nums.pop(total_idx_to_remove)
+        
+    # حذف المجاميع العامة إذا دخلت في السطر
+    nums = [t for t in nums if t[1] != tb_val]
+    
+    if len(nums) < 1: return None
 
     qty = None
     unit_price = None
 
-    # 💡 القاعدة الذهبية: الرقم ذو العلامة العشرية (السعر)، والرقم الصحيح (الكمية)
-    decimal_indices =[i for i, (s, v) in enumerate(raw_nums) if '.' in s]
-    sku_nums = {18, 99, 510, 106, 3590} # أكواد مستبعدة من كونها كميات
+    decimals = [t for t in nums if '.' in t[0]]
+    integers =[t for t in nums if '.' not in t[0]]
     
-    if decimal_indices:
-        # نأخذ آخر رقم عشري ونعتبره السعر
-        price_idx = decimal_indices[-1]
-        unit_price = raw_nums[price_idx][1]
-        
-        # 1. نبحث عن الكمية (الرقم الصحيح) قبل السعر
-        for idx in range(price_idx - 1, -1, -1):
-            if '.' not in raw_nums[idx][0] and raw_nums[idx][1] not in sku_nums:
-                qty = raw_nums[idx][1]
-                break
-                
-        # 2. إذا لم نجدها قبل السعر (بسبب قلب النصوص)، نبحث بعدها
-        if qty is None:
-            for idx in range(price_idx + 1, len(raw_nums)):
-                if '.' not in raw_nums[idx][0] and raw_nums[idx][1] not in sku_nums:
-                    qty = raw_nums[idx][1]
-                    break
-                    
-        # 3. احتياطي
-        if qty is None:
-            qty = raw_nums[price_idx - 1][1] if price_idx > 0 else raw_nums[0][1]
-            
-    else:
-        # في حال لم يقرأ الـ OCR النقطة العشرية بالكامل
-        if len(raw_nums) >= 2:
-            qty = raw_nums[-2][1]
-            unit_price = raw_nums[-1][1]
-        else:
-            qty = raw_nums[0][1]
-            unit_price = raw_nums[0][1]
+    # استبعاد أكواد المنتجات من أن تكون كميات
+    sku_nums = {18, 99, 510, 106, 6, 2, 4, 3590, 10, 9, 2026}
+    integers = [t for t in integers if t[1] not in sku_nums]
 
-    # تحويل الكمية إلى عدد صحيح (مثال: 200.0 تصبح 200)
+    # 💡 2. تطبيق القاعدة الذهبية للأسعار والكميات
+    if decimals:
+        price_idx = decimals[-1][0]
+        unit_price = decimals[-1][1]
+        
+        possible_qtys_before = [t for t in integers if t[0] < price_idx]
+        if possible_qtys_before:
+            qty = possible_qtys_before[-1][1]
+        else:
+            possible_qtys_after = [t for t in integers if t[0] > price_idx]
+            if possible_qtys_after:
+                qty = possible_qtys_after[0][1]
+            elif integers:
+                qty = integers[0][1]
+    else:
+        if len(integers) >= 2:
+            qty = integers[-2][1]
+            unit_price = integers[-1][1]
+        elif nums:
+            qty = nums[0][1]
+            unit_price = nums[0][1]
+
     if qty is not None:
         try:
             qty = int(qty) if float(qty).is_integer() else qty
         except: pass
 
-    # توحيد اسم المنتج بشكل قاطع باستخدام الكتالوج المبرمج مسبقاً
+    # توحيد اسم المنتج بشكل قاطع باستخدام الكتالوج
     std_sku, std_desc = standardize_product(line)
     if std_sku:
         sku, desc = std_sku, std_desc
@@ -304,22 +319,24 @@ def extract_metadata(pdf_path, text):
 
     tb = ta = vat = paid = bal = 0.0
 
-    # 💡 تنظيف النص من أرقام البنوك والتواريخ حتى لا تتدخل في المجاميع المالية
+    # تنظيف الأرقام البنكية وتواريخ السنين لمنع التشويش على المجاميع
     safe_text = re.sub(r'SA\d{22}', '', text)
     safe_text = re.sub(r'\b\d{10,}\b', '', safe_text)
     safe_text = re.sub(r'\d{1,2}[/\-]\d{1,2}[/\-]\d{4}', '', safe_text) 
 
-    m_tot = re.search(r'(?:الإ[جح]مالي|الإإ[جح]مالي|اإلجمالي|الاجمالي|الإجمالي)\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
+    m_tot = re.search(r'(?:الإ[جح]مالي|الإإ[جح]مالي|اإلجمالي|الاجمالي|الإجمالي)\s*[:\-]?\s*([\d.,]+)', safe_text)
     if m_tot: ta = clean_number(m_tot.group(1))
 
-    m_sub = re.search(r'المجموع\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
+    m_sub = re.search(r'المجموع\s*[:\-]?\s*([\d.,]+)', safe_text)
     if m_sub: tb = clean_number(m_sub.group(1))
 
-    m_vat = re.search(r'(?:القيمة المضافة|المضافة|15%)\s*[:\-]?\s*([\d,]+\.?\d*)', safe_text)
+    m_vat = re.search(r'(?:القيمة المضافة|المضافة|15%)\s*[:\-]?\s*([\d.,]+)', safe_text)
     if m_vat: vat = clean_number(m_vat.group(1))
 
     if not ta or not tb:
-        nums_raw =[clean_number(n) for n in re.findall(r"[\d,]+\.?\d*", safe_text) if clean_number(n) and clean_number(n) > 100]
+        nums_raw =[clean_number(n) for n in re.findall(r"\b\d+(?:[.,]\d+)*\b", safe_text)]
+        nums_raw =[n for n in nums_raw if n is not None and n > 100]
+        
         unique = sorted(set(nums_raw))
         best_diff = float("inf")
         best_ta, best_tb = None, None
@@ -384,7 +401,7 @@ def process_pdf(pdf_path):
     if not items:
         items =[{"Unit price": None, "Quantity": None, "Description": "", "SKU": ""}]
 
-    rows =[{**meta, **item} for item in items]
+    rows = [{**meta, **item} for item in items]
     return pd.DataFrame(rows).reindex(columns=FINAL_COLS), mode, text
 
 # =====================
@@ -435,12 +452,12 @@ if uploaded_files:
 
             st.success(f"✅ Done! {len(final_df)} total row(s)")
             
-            # 💡 عرض البيانات في الموقع مع تثبيت العلامة العشرية (18.00)
+            # 💡 عرض البيانات في الموقع مع تثبيت العلامة العشرية .00
             money_cols =["Balance", "Paid", "Total before tax", "VAT 15%", "Total after tax", "Unit price"]
             format_dict = {c: "{:.2f}" for c in money_cols if c in final_df.columns}
             st.dataframe(final_df.style.format(format_dict, na_rep=""))
 
-            # 💡 تحميل ملف الإكسيل مع إجبار الإكسيل على كتابة (.00)
+            # 💡 تحميل ملف الإكسيل مع إجبار الإكسيل على كتابة الفاصلة .00
             out = BytesIO()
             writer = pd.ExcelWriter(out, engine='openpyxl')
             final_df.to_excel(writer, index=False, sheet_name='Invoices')
