@@ -41,7 +41,7 @@ UNIT_WORDS = {
 }
 
 HEADER_KW =["البند", "الوصف", "العدد", "سعر الوحدة", "الكمية", "الوحدة"]
-STOP_KWS =["المجموع", "القيمة المضافة", "الإجمالي", "الإحمالي", "اإلجمالي", "الاجمالي", "الرصيد", "الايبان", "رقم الحساب"]
+STOP_KWS =["المجموع", "القيمة المضافة", "الإجمالي", "الإحمالي", "اإلجمالي", "الاجمالي","الإإحمالي", "الرصيد", "الايبان", "رقم الحساب"]
 SKIP_KWS =["العنوان", "الضريبي", "السجل", "تاريخ", "العميل", "فاكس", "هاتف", "جوال", "إلى", "رقم الفاتورة", "رقم الغاتورة", "الفاتورة", "الغاتورة", "مدفوع", "مرتجع"]
 
 FINAL_COLS =[
@@ -52,10 +52,10 @@ FINAL_COLS =[
     "Source File",
 ]
 
-# 👑 الكتالوج الصارم لتوحيد أسماء المنتجات تماماً
+# 👑 الكتالوج الصارم لتوحيد أسماء المنتجات
 PRODUCT_CATALOG =[
     {
-        "keywords": ["صاحبة", "SAHIBA"],
+        "keywords":["صاحبة", "SAHIBA"],
         "sku": "فيل ليج هندي صاحبة 18 ك (510)",
         "desc": "VEAL LEG SAHIBA"
     },
@@ -65,12 +65,12 @@ PRODUCT_CATALOG =[
         "desc": "VEAL LEG ELFAROUK"
     },
     {
-        "keywords": ["فوركوارتر", "FOREQUARTER", "FQ", "AMBER"],
+        "keywords":["فوركوارتر", "FOREQUARTER", "FQ", "AMBER"],
         "sku": "فوركوارتر هندي عمبر",
         "desc": "FQ FOREQUARTER AMBER"
     },
     {
-        "keywords": ["كبدة", "LAMBLIVER", "JUNNE"],
+        "keywords":["كبدة", "LAMBLIVER", "JUNNE"],
         "sku": "كبدة ضأن استرالي جوني جولد",
         "desc": "LAMBLIVER JUNNE GOLD"
     },
@@ -80,19 +80,18 @@ PRODUCT_CATALOG =[
         "desc": "BONEINCUT WAY"
     },
     {
-        "keywords": ["فخده", "WHOLE LEG", "رستم", "RUSTAM"],
+        "keywords":["فخده", "WHOLE LEG", "رستم", "RUSTAM"],
         "sku": "فخده كامله هندي رستم",
         "desc": "WHOLE LEG RUSTAM"
     },
     {
-        "keywords": ["فيليه", "TENDERLOIN"],
+        "keywords":["فيليه", "TENDERLOIN"],
         "sku": "فيليه عجل هندي عمبر 18 ك (99)",
         "desc": "VEAL TENDERLOIN KG"
     }
 ]
 
 def standardize_product(raw_text):
-    """توحيد اسم المنتج بناءً على كلمات مفتاحية"""
     raw_upper = raw_text.upper()
     for product in PRODUCT_CATALOG:
         for kw in product["keywords"]:
@@ -111,7 +110,7 @@ def extract_sku_from_line(line):
     if not raw:
         ar_words = re.findall(r"[\u0600-\u06FF]{2,}", line)
         raw = " ".join(w for w in ar_words if w not in UNIT_WORDS)
-    for b in re.findall(r"\(\s*\d+\s*\)", line):
+    for b in re.findall(r"[\(\)\[\]]\s*\d+\s*[\(\)\[\]]", line):
         b_clean = "(" + re.search(r"\d+", b).group() + ")"
         if b_clean not in raw.replace(" ", ""):
             raw = raw + " " + b_clean
@@ -142,7 +141,7 @@ def get_ocr_words(pdf_path):
     except Exception:
         with fitz.open(pdf_path) as doc:
             pix = doc[0].get_pixmap(matrix=fitz.Matrix(3, 3))
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        img = Image.frombytes("RGB",[pix.width, pix.height], pix.samples)
     data = pytesseract.image_to_data(
         img, lang="ara+eng", config="--psm 6",
         output_type=pytesseract.Output.DATAFRAME,
@@ -152,7 +151,7 @@ def get_ocr_words(pdf_path):
     return data
 
 def reconstruct_table_rows(word_df, y_tolerance=15):
-    if word_df.empty: return []
+    if word_df.empty: return[]
     word_df = word_df.copy()
     word_df["mid_y"] = word_df["top"] + word_df["height"] / 2
     rows =[]
@@ -169,88 +168,56 @@ def reconstruct_table_rows(word_df, y_tolerance=15):
     return rows
 
 def get_nums(segment):
-    return [n for n in re.findall(r"[\d,]+\.?\d*", segment) if clean_number(n) not in (0, None) and len(re.sub(r"[,.]", "", n)) <= 8]
+    # إزالة الفواصل الكبيرة أولاً حتى لا تتقطع الأرقام (مثل 22,680)
+    seg_clean = segment.replace(",", "")
+    matches = re.findall(r"\b\d+(?:\.\d+)?\b", seg_clean)
+    return[n for n in matches if clean_number(n) and clean_number(n) > 0]
 
 def parse_item_line(line, tb_val=0.0):
-    # مسح الأرقام بين الأقواس (مثل 510) لمنع تداخلها
-    pack_bracket = set()
-    for m in re.finditer(r"\(\s*(\d+)\s*\)", line):
-        pack_bracket.add(m.group(1))
+    # مسح الأقواس لتجنب تداخل الأرقام مثل (99) أو (510)
+    line_clean = re.sub(r"[\(\)\[\]]\s*\d+\s*[\(\)\[\]]", " ", line)
 
-    all_nums = get_nums(line)
-    candidates =[n for n in all_nums if n not in pack_bracket]
+    raw_nums = get_nums(line_clean)
+    valid_strs = []
+    cand_floats =[]
     
-    if len(candidates) < 2: return None
+    for s in raw_nums:
+        v = clean_number(s)
+        if v and v > 0:
+            valid_strs.append(s)
+            cand_floats.append(v)
+            
+    if len(cand_floats) < 2: return None
 
-    # استخراج الإجمالي الخاص بالسطر
-    row_total = clean_number(candidates[-1]) if len(candidates) > 1 else None
-    if row_total and row_total > 100:
-        candidates = candidates[:-1]
-    else:
-        row_total = None
-
-    qty, unit_price = None, None
-    cand_floats =[clean_number(n) for n in candidates if clean_number(n)]
-    valid_strs =[s for s in candidates if clean_number(s)]
-    matched = False
-
-    targets =[]
-    if row_total and row_total > 0: targets.append(row_total)
-    if tb_val and tb_val > 0: targets.append(tb_val)
-
-    # 💡 1. المحاولة الأولى: الضرب الرياضي لمعرفة الكمية والسعر (Qty * Price = Total)
-    for target in targets:
-        for i, v1 in enumerate(cand_floats):
-            for j, v2 in enumerate(cand_floats):
-                if i >= j: continue
-                if abs(v1 * v2 - target) / target < 0.05:
-                    leftovers =[v for idx, v in enumerate(cand_floats) if idx not in (i, j)]
-                    
-                    # استبعاد رقم 18 الخاص بالوزن إذا وجدنا كمية أخرى صحيحة (مثل 49 أو 200)
-                    ints =[v for v in leftovers if float(v).is_integer()]
-                    if len(ints) > 1 and 18 in ints:
-                        ints.remove(18)
-                        
-                    if leftovers:
-                        qty = max(ints) if ints else leftovers[0]
-                        s1, s2 = valid_strs[i], valid_strs[j]
-                        if '.' in s1 and '.' not in s2:
-                            unit_price = v1
-                        elif '.' in s2 and '.' not in s1:
-                            unit_price = v2
-                        else:
-                            unit_price = min(v1, v2)
-                    else:
-                        s1, s2 = valid_strs[i], valid_strs[j]
-                        if '.' in s1 and '.' not in s2:
-                            qty, unit_price = v2, v1
-                        elif '.' in s2 and '.' not in s1:
-                            qty, unit_price = v1, v2
-                        else:
-                            if i < j:
-                                qty, unit_price = v1, v2
-                            else:
-                                qty, unit_price = v2, v1
-                    matched = True
-                    break
-            if matched: break
-        if matched: break
-
-    # 💡 2. المحاولة الثانية: الفرز الذكي (الفاصلة العشرية للسعر، والرقم الصحيح للكمية)
-    if not matched:
-        has_dot_idx =[idx for idx, s in enumerate(valid_strs) if '.' in s]
-        no_dot_idx =[idx for idx, s in enumerate(valid_strs) if '.' not in s]
+    # حذف الإجمالي من السطر إذا كان موجوداً في النهاية لكي لا نشوش على الكمية والسعر
+    if cand_floats[-1] > 100 or len(cand_floats) >= 4:
+        cand_floats = cand_floats[:-1]
+        valid_strs = valid_strs[:-1]
         
-        if has_dot_idx and no_dot_idx:
-            unit_price = cand_floats[has_dot_idx[0]]
-            possible_qtys = [cand_floats[idx] for idx in no_dot_idx]
-            if len(possible_qtys) > 1 and 18 in possible_qtys:
-                possible_qtys.remove(18)
-            qty = max(possible_qtys) if possible_qtys else cand_floats[no_dot_idx[0]]
-        elif len(cand_floats) >= 2:
-            qty = min(cand_floats[0], cand_floats[1])
-            unit_price = max(cand_floats[0], cand_floats[1])
-        elif cand_floats:
+    if len(cand_floats) < 1: return None
+
+    qty = None
+    unit_price = None
+
+    # 💡 القاعدة الذهبية (التي طلبتها): نبحث عن الرقم ذو العلامة العشرية (السعر) وما قبله هو (الكمية)
+    decimal_indices =[i for i, s in enumerate(valid_strs) if '.' in s]
+    
+    if decimal_indices:
+        price_idx = decimal_indices[0] # أول رقم به علامة عشرية
+        unit_price = cand_floats[price_idx]
+        
+        # الرقم الذي يسبقه مباشرة هو العدد/الكمية
+        if price_idx > 0:
+            qty = cand_floats[price_idx - 1]
+        else:
+            qty = cand_floats[0]
+            
+    else:
+        # احتياطي: في حال لم يقرأ الـ OCR النقطة، نفترض الترتيب المنطقي (العدد ثم السعر)
+        if len(cand_floats) >= 2:
+            qty = cand_floats[-2]
+            unit_price = cand_floats[-1]
+        else:
             qty = cand_floats[0]
             unit_price = cand_floats[0]
 
@@ -259,7 +226,7 @@ def parse_item_line(line, tb_val=0.0):
             qty = int(qty) if float(qty).is_integer() else qty
         except: pass
 
-    # 💡 توحيد اسم المنتج بشكل قاطع باستخدام الكتالوج المبرمج مسبقاً
+    # توحيد اسم المنتج بشكل قاطع باستخدام الكتالوج المبرمج مسبقاً
     std_sku, std_desc = standardize_product(line)
     if std_sku:
         sku, desc = std_sku, std_desc
@@ -273,7 +240,6 @@ def parse_item_line(line, tb_val=0.0):
     return {"SKU": sku, "Description": desc, "Quantity": qty, "Unit price": unit_price}
 
 def extract_items_text(text, tb_val):
-    """خوارزمية شاملة ونهائية لاستخراج المنتجات نصياً (تعمل مع Native و OCR)"""
     items =[]
     for line in text.split("\n"):
         line = line.strip()
@@ -282,7 +248,6 @@ def extract_items_text(text, tb_val):
         is_summary = any(kw in line for kw in STOP_KWS)
         has_english = bool(re.search(r'[A-Za-z]{3,}', line))
         
-        # لن يتوقف حتى يجد سطر المجموع الفعلي (وليس عنوان الجدول)
         if is_summary and not has_english and not any(h in line for h in HEADER_KW):
             break 
             
@@ -312,7 +277,7 @@ def extract_metadata(pdf_path, text):
     if m_date: inv_date = m_date.group(1).strip()
 
     address = ""
-    m_add = re.search(r'العنوان\s*:\s*(.+?)(?=\n\s*05|\n\s*\d{10}|\n\s*البند|\n\s*المجموع|05\d{8}|فيل|كبدة|عجل|فخده|فوركوارتر)', text, re.DOTALL)
+    m_add = re.search(r'العنوان\s*:\s*(.+?)(?=\n\s*05|\n\s*\d{10}|\n\s*البند|\n\s*المجموع|05\d{8}|فيل|كبدة|عجل|فخده|فوركوارتر|فيليه)', text, re.DOTALL)
     if m_add:
         address = m_add.group(1).replace('\n', ' ').strip()
         address = re.sub(r'\s*\d{10}\s*$', '', address).strip()
@@ -371,10 +336,8 @@ def process_pdf(pdf_path):
     meta = extract_metadata(pdf_path, text)
     tb_val = meta.get("Total before tax", 0.0)
 
-    # 1. الاستخراج الرئيسي باستخدام محلل النصوص الذكي (Robust Line Parser)
     items = extract_items_text(text, tb_val)
 
-    # 2. الاستخراج البديل إذا فشل القارئ في بعض الحالات
     if not items and mode == "ocr":
         word_df = get_ocr_words(pdf_path)
         if not word_df.empty:
