@@ -1,7 +1,7 @@
 # streamlit_app.py
 
 import streamlit as st
-import fitz  # PyMuPDF
+import fitz
 import pdfplumber
 import pandas as pd
 import re
@@ -9,27 +9,31 @@ import tempfile
 import zipfile
 from pathlib import Path
 from io import BytesIO
-import arabic_reshaper
-from bidi.algorithm import get_display
 
 # OCR
 import pytesseract
 from pdf2image import convert_from_path
 
 # =========================
-# Arabic Helpers
+# OCR FUNCTION (FIXED 🔥)
 # =========================
 
-def reshape_arabic_text(text):
-    try:
-        reshaped = arabic_reshaper.reshape(text)
-        bidi_text = get_display(reshaped)
-        return bidi_text
-    except:
-        return text
+def ocr_pdf(pdf_path):
+    text_pages = []
+    images = convert_from_path(pdf_path, dpi=400)  # higher quality
+
+    for img in images:
+        text = pytesseract.image_to_string(
+            img,
+            lang="ara",  # 🔥 IMPORTANT: Arabic only
+            config="--oem 3 --psm 4"
+        )
+        text_pages.append(text)
+
+    return "\n".join(text_pages)
 
 # =========================
-# Normalize OCR Text 🔥
+# TEXT CLEANING
 # =========================
 
 def normalize_text(text):
@@ -39,122 +43,95 @@ def normalize_text(text):
     return text.strip()
 
 # =========================
-# OCR FUNCTION
+# SMART FIELD EXTRACTION
 # =========================
 
-def ocr_pdf(pdf_path):
-    text_pages = []
-    images = convert_from_path(pdf_path, dpi=300)
-
-    for img in images:
-        text = pytesseract.image_to_string(
-            img,
-            lang="ara+eng",
-            config="--oem 3 --psm 6"
-        )
-        text_pages.append(text)
-
-    return "\n".join(text_pages)
-
-# =========================
-# Smart Field Extraction 🔥
-# =========================
-
-def find_field(text, keyword_pattern):
-    text = normalize_text(text)
-
-    pattern = rf"{keyword_pattern}\s*[:\-]?\s*(.{{0,60}})"
-    match = re.search(pattern, text)
-
+def extract_invoice_number(text):
+    # Try normal Arabic label
+    match = re.search(r"(رقم.*?)(\d{4,})", text)
     if match:
-        value = match.group(1)
+        return match.group(2)
 
-        # stop at next keyword-like word
-        value = re.split(r"(رقم|تاريخ|الإجمالي|الضريبة|المبلغ)", value)[0]
+    # fallback: first long number
+    match = re.search(r"\b\d{4,}\b", text)
+    return match.group(0) if match else ""
 
-        return value.strip()
 
-    return ""
+def extract_customer(text):
+    # Look for مؤسسة or شركة
+    match = re.search(r"(مؤسسة\s+[^\n]+)", text)
+    if match:
+        return match.group(1)
+
+    match = re.search(r"(شركة\s+[^\n]+)", text)
+    return match.group(1) if match else ""
+
+
+def extract_address(text):
+    match = re.search(r"(حي\s+[^\n]+)", text)
+    return match.group(1) if match else ""
+
 
 # =========================
-# Metadata Extraction
+# METADATA EXTRACTION
 # =========================
 
 def extract_metadata(pdf_path):
     try:
         with fitz.open(pdf_path) as doc:
-            full_text = "\n".join([page.get_text() for page in doc])
+            text = "\n".join([page.get_text() for page in doc])
 
         # OCR fallback
-        if not full_text.strip() or len(full_text.strip()) < 50:
-            full_text = ocr_pdf(pdf_path)
+        if not text.strip() or len(text.strip()) < 50:
+            text = ocr_pdf(pdf_path)
+
+        text = normalize_text(text)
+
+        # 🔥 DEBUG (see OCR result)
+        st.text_area("🔍 OCR TEXT", text[:2000], height=200)
 
         metadata = {
-            "Invoice Number": find_field(full_text, r"(رقم الفاتورة|فاتورة رقم|Invoice\s*No)"),
-            "Invoice Date": find_field(full_text, r"(تاريخ الفاتورة|التاريخ|Date)"),
-            "Customer Name": find_field(full_text, r"(اسم العميل|العميل|Customer)"),
-            "Address": find_field(full_text, r"(العنوان)"),
-            "Paid": find_field(full_text, r"(مدفوع|Paid)"),
-            "Balance": find_field(full_text, r"(الإجمالي|Total)"),
-            "Not Paid": find_field(full_text, r"(الرصيد المستحق|Remaining)"),
+            "Invoice Number": extract_invoice_number(text),
+            "Customer Name": extract_customer(text),
+            "Address": extract_address(text),
+            "Invoice Date": "",
+            "Paid": "",
+            "Balance": "",
+            "Not Paid": "",
             "Source File": pdf_path.name
         }
 
         return metadata
 
     except Exception as e:
-        st.error(f"❌ Error extracting metadata from {pdf_path.name}: {e}")
+        st.error(f"❌ Metadata error: {e}")
         return {}
 
 # =========================
-# Table Extraction
+# TABLE EXTRACTION (OCR BASED)
 # =========================
 
 def extract_tables(pdf_path):
     try:
-        with pdfplumber.open(pdf_path) as pdf:
-            all_data = []
-            found_tables = False
+        text = ocr_pdf(pdf_path)
+        lines = text.split("\n")
 
-            for page in pdf.pages:
-                tables = page.extract_tables()
+        data = []
 
-                if tables:
-                    found_tables = True
+        for line in lines:
+            if re.search(r"\d", line):
+                parts = re.split(r"\s{2,}", line)
+                if len(parts) >= 3:
+                    data.append(parts)
 
-                for table in tables:
-                    if table:
-                        df = pd.DataFrame(table)
-                        df = df.dropna(how="all").reset_index(drop=True)
-
-                        if df.empty:
-                            continue
-
-                        all_data.append(df)
-
-            # OCR fallback for tables
-            if not found_tables:
-                text = ocr_pdf(pdf_path)
-                lines = text.split("\n")
-                data = []
-
-                for line in lines:
-                    if re.search(r"\d", line):
-                        parts = re.split(r"\s{2,}", line)
-                        if len(parts) >= 3:
-                            data.append(parts)
-
-                if data:
-                    return pd.DataFrame(data)
-
-            return pd.concat(all_data, ignore_index=True) if all_data else pd.DataFrame()
+        return pd.DataFrame(data) if data else pd.DataFrame()
 
     except Exception as e:
-        st.error(f"❌ Error extracting table from {pdf_path.name}: {e}")
+        st.error(f"❌ Table error: {e}")
         return pd.DataFrame()
 
 # =========================
-# Main Process
+# MAIN PROCESS
 # =========================
 
 def process_pdf(pdf_path):
@@ -169,13 +146,17 @@ def process_pdf(pdf_path):
         return pd.DataFrame([metadata])
 
 # =========================
-# Streamlit UI
+# STREAMLIT UI
 # =========================
 
-st.set_page_config(page_title="Invoice Extractor", layout="wide")
-st.title("📄 Arabic Invoice Extractor (OCR Ready)")
+st.set_page_config(page_title="Arabic Invoice Extractor", layout="wide")
+st.title("📄 Arabic Invoice Extractor (Stable Version)")
 
-uploaded_files = st.file_uploader("Upload PDF or ZIP", type=["pdf", "zip"], accept_multiple_files=True)
+uploaded_files = st.file_uploader(
+    "Upload PDF or ZIP",
+    type=["pdf", "zip"],
+    accept_multiple_files=True
+)
 
 if uploaded_files:
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -184,14 +165,14 @@ if uploaded_files:
 
         for uploaded_file in uploaded_files:
             file_path = temp_dir / uploaded_file.name
+
             with open(file_path, "wb") as f:
                 f.write(uploaded_file.read())
 
             if uploaded_file.name.endswith(".zip"):
                 with zipfile.ZipFile(file_path, 'r') as zip_ref:
                     zip_ref.extractall(temp_dir)
-                for pdf in temp_dir.glob("*.pdf"):
-                    pdf_paths.append(pdf)
+                pdf_paths.extend(temp_dir.glob("*.pdf"))
             else:
                 pdf_paths.append(file_path)
 
@@ -207,29 +188,7 @@ if uploaded_files:
         if all_data:
             final_df = pd.concat(all_data, ignore_index=True)
 
-            # Clean numeric fields
-            for col in ["Paid", "Balance", "Not Paid"]:
-                if col in final_df.columns:
-                    final_df[col] = (
-                        final_df[col].astype(str)
-                        .str.replace(r"[^\d.]", "", regex=True)
-                        .replace("", None)
-                        .astype(float)
-                    )
-
-            if "Total before tax" in final_df.columns:
-                final_df["Total before tax"] = pd.to_numeric(final_df["Total before tax"], errors="coerce")
-                final_df["VAT 15%"] = final_df["Total before tax"] * 0.15
-                final_df["Total after tax"] = final_df["Total before tax"] * 1.15
-
-            if "Invoice Date" in final_df.columns:
-                final_df["Invoice Date"] = pd.to_datetime(
-                    final_df["Invoice Date"],
-                    errors="coerce",
-                    dayfirst=True
-                ).dt.strftime("%m/%d/%Y")
-
-            st.success("✅ Done!")
+            st.success("✅ Extraction complete!")
             st.dataframe(final_df)
 
             output = BytesIO()
