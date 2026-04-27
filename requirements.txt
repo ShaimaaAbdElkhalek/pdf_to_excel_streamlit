@@ -1,10 +1,10 @@
 streamlit
+PyMuPDF
 pdfplumber
 pandas
-openpyxl
-pytesseract
-pdf2image
 Pillow
-pymupdf
-arabic_reshaper 
-bidi
+pytesseract
+arabic-reshaper
+python-bidi
+pdf2image
+openpyxl
