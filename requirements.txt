@@ -5,3 +5,4 @@ openpyxl
 pytesseract
 pdf2image
 Pillow
+fitz
